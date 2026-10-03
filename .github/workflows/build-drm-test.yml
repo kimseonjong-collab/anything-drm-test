@@ -1,0 +1,79 @@
+name: Build DRM Test Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/xlsx-wincom-timeout
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Checkout kordoc
+        uses: actions/checkout@v4
+        with:
+          repository: chrisryugj/kordoc
+          path: kordoc-src
+          ref: 265b055bc977ccf35e150919ad49189b57e55ee8
+
+      - name: Build kordoc dist
+        working-directory: kordoc-src
+        shell: pwsh
+        run: |
+          npm ci
+          npm run build
+          if (-not (Test-Path "dist/cli.js")) {
+            Write-Error "kordoc build output (dist/cli.js) not found"
+            exit 1
+          }
+
+      - name: Bundle kordoc into Tauri resources
+        shell: pwsh
+        run: |
+          & scripts/bundle-kordoc.ps1 -KordocDir "${{ github.workspace }}/kordoc-src"
+
+      - name: Download ONNX models
+        shell: pwsh
+        run: |
+          & scripts/download-model.ps1
+
+      - name: Download VC++ Redistributable
+        shell: pwsh
+        run: |
+          & scripts/download-vcredist.ps1
+
+      - name: Build Windows NSIS installer
+        shell: pwsh
+        run: pnpm exec tauri build --bundles nsis
+
+      - name: Upload test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: anything-v3.8.12-drm-timeout-test
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
