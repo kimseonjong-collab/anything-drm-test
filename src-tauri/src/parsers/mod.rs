@@ -392,7 +392,7 @@ fn wincom_fallback_pptx(path: &Path, err: ParseError) -> Result<ParsedDocument, 
 #[cfg(windows)]
 fn wincom_fallback_xlsx(path: &Path, err: ParseError) -> Result<ParsedDocument, ParseError> {
     if crate::constants::is_use_wincom_for_xlsx() {
-        parse_with_timeout(path, 30, "XLS/XLSX", wincom_xlsx::parse)
+        parse_with_timeout(path, 120, "XLS/XLSX(COM)", wincom_xlsx::parse)
     } else {
         Err(err)
     }
