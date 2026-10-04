@@ -1,4 +1,10 @@
 # Changelog
+## [3.8.13] - 2026-10-05
+
+### Fixed
+- Added safe `인덱스 수선` action for DRM/network extraction failures. Existing healthy FTS indexes are preserved while incomplete documents are retried.
+- Renamed destructive `재인덱싱` to `전체 다시 인덱싱` and strengthened its warning.
+
 
 ## [3.8.12] - 2026-09-30
 
