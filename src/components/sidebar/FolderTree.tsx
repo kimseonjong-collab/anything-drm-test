@@ -192,7 +192,7 @@ export function FolderTree({ folders, onRemoveFolder, onFoldersChange, onReindex
     closeContextMenu();
     const confirmed = await ask(
       `"${getFolderName(path)}" 폴더를 처음부터 다시 읽습니다.\n다 읽을 때까지 이 폴더의 문서가 검색에 덜 나올 수 있어요.`,
-      { title: "다시 읽기", kind: "info", okLabel: "다시 읽기", cancelLabel: "취소" }
+      { title: "전체 다시 인덱싱", kind: "warning", okLabel: "전체 다시 인덱싱", cancelLabel: "취소" }
     );
     if (!confirmed) return;
     onReindexStart?.();
@@ -205,7 +205,10 @@ export function FolderTree({ folders, onRemoveFolder, onFoldersChange, onReindex
     }
   };
 
-  // 이어서 인덱싱 (resume — fts_indexed_at 있는 파일은 스킵)
+  // 인덱스 수선 / 이어서 인덱싱.
+  // resume_folder_fts는 fts_indexed_at이 있는 정상 문서는 건너뛰고,
+  // DRM/네트워크/파서 오류로 메타데이터만 남아 fts_indexed_at이 NULL인 문서를 다시 시도한다.
+  // 기존 정상 인덱스는 삭제하지 않는다.
   const handleResume = async () => {
     const path = contextMenu.folderPath;
     closeContextMenu();
@@ -217,7 +220,7 @@ export function FolderTree({ folders, onRemoveFolder, onFoldersChange, onReindex
       onFoldersChange?.();
     } catch (err) {
       logToBackend("error", "Failed to resume indexing", String(err), "FolderTree");
-      showToast(`이어서 읽기 실패: ${getErrorMessage(err)}`, "error");
+      showToast(`인덱스 수선 실패: ${getErrorMessage(err)}`, "error");
     }
   };
 
@@ -581,15 +584,26 @@ export function FolderTree({ folders, onRemoveFolder, onFoldersChange, onReindex
             이어서 인덱싱
           </button>
         )}
-        {/* 재인덱싱 (전체 wipe → 처음부터) */}
+        {/* 안전한 수선 — 정상 FTS는 보존하고 실패/미완료 문서만 재시도.
+            DRM 문서를 네트워크/Fasoo 정상화 후 보완할 때 사용하는 기본 명령. */}
+        <button
+          role="menuitem"
+          onClick={handleResume}
+          className="ctx-menu-item w-full px-3 py-2 text-left text-sm flex items-center gap-2"
+          title="정상 인덱스는 유지하고 DRM/네트워크 오류 등으로 본문 인덱싱이 안 된 문서만 다시 시도"
+        >
+          <RefreshCw className="w-4 h-4 clr-info" />
+          인덱스 수선
+        </button>
+        {/* 파괴적 전체 재구축 — 정말 필요한 경우에만 사용 */}
         <button
           role="menuitem"
           onClick={handleReindex}
           className="ctx-menu-item w-full px-3 py-2 text-left text-sm flex items-center gap-2"
-          title="전체 wipe 후 처음부터 재인덱싱 (중단된 상태에서 이어가려면 '이어서 인덱싱' 사용)"
+          title="기존 인덱스를 삭제하고 폴더 전체를 처음부터 다시 인덱싱"
         >
-          <RefreshCw className="w-4 h-4 clr-info" />
-          재인덱싱
+          <RotateCcw className="w-4 h-4 clr-warning" />
+          전체 다시 인덱싱
         </button>
         {/* 인덱싱 상태 초기화 — 미완료(failed/cancelled/indexing) 상태일 때만.
             SMB 등에서 반복 실패해 고착된 자동 resume 루프를 끊는 escape hatch (이슈 #29) */}
