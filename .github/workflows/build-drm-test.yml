@@ -68,7 +68,7 @@ jobs:
 
       - name: Build Windows NSIS installer
         shell: pwsh
-        run: pnpm exec tauri build --bundles nsis
+        run: pnpm exec tauri build --config src-tauri/tauri.drm-test.conf.json --bundles nsis
 
       - name: Upload test installer
         uses: actions/upload-artifact@v4
