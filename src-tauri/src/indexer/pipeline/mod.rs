@@ -396,7 +396,9 @@ fn index_folder_fts_impl(
         }
         let before = file_paths.len();
         file_paths.retain(|p| {
-            !verified.contains(&crate::utils::network_path::normalize_for_compare(p, &drive_map))
+            !verified.contains(&crate::utils::network_path::normalize_for_compare(
+                p, &drive_map,
+            ))
         });
         tracing::info!(
             "[Safe Repair] {} unverified supported files selected ({} already verified skipped)",
