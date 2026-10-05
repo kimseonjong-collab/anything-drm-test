@@ -325,6 +325,12 @@ fn parse_file_inner(
             }
         })),
         "hwpx" => parse_with_timeout(path, 30, "HWPX", hwpx::parse),
+        // Legacy .doc has no ZIP/XML parser; on Windows it must go directly through Word COM.
+        // Keeping it in the same fallback wrapper also respects the existing COM feature toggle.
+        "doc" => wincom_fallback_docx(
+            path,
+            ParseError::UnsupportedFileType("doc (Windows Word COM 필요)".into()),
+        ),
         "docx" => {
             let parse_result = parse_with_timeout(path, 30, "DOCX", docx::parse);
             match parse_result {
@@ -332,6 +338,11 @@ fn parse_file_inner(
                 Err(err) => wincom_fallback_docx(path, err),
             }
         }
+        // Legacy .ppt likewise requires PowerPoint COM; the Rust parser only handles OOXML .pptx.
+        "ppt" => wincom_fallback_pptx(
+            path,
+            ParseError::UnsupportedFileType("ppt (Windows PowerPoint COM 필요)".into()),
+        ),
         "pptx" => {
             let parse_result = parse_with_timeout(path, 30, "PPTX", pptx::parse);
             match parse_result {
