@@ -4,11 +4,13 @@
 //! 설치된 PowerPoint 로 프레젠테이션을 열어 각 슬라이드의 도형(Shape) 텍스트와
 //! 노트(NotesPage) 텍스트를 추출한다.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::Duration;
 
 use super::{
-    to_parse_error, v_string, var_i32, var_str, AppGuard, AppKind, ComApartment, Obj, MSO_FALSE,
-    MSO_TRUE,
+    quit_if_idle, to_parse_error, v_string, var_i32, var_str, ComApartment, Obj,
+    ScopedAppSettings, MSO_FALSE, MSO_TRUE,
 };
 use crate::parsers::{
     DocumentChunk, DocumentMetadata, ParseError, ParsedDocument, DEFAULT_CHUNK_OVERLAP,
@@ -34,9 +36,7 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
         }
     }
 
-    let _com = ComApartment::init();
-
-    let slides = extract_slides(path).map_err(|e| to_parse_error("PowerPoint", &e))?;
+    let slides = request_slides(path)?;
     if slides.is_empty() {
         tracing::warn!("PPTX(COM) file has no text content: {:?}", path);
     }
@@ -90,13 +90,10 @@ struct SlideText {
 ///
 /// Application → `Presentations.Open` → `Slides` 컬렉션 순회 →
 /// 각 슬라이드의 Shape 텍스트 + `NotesPage` 텍스트 수집 순서로 동작.
-fn extract_slides(path: &Path) -> windows::core::Result<Vec<SlideText>> {
-    let app = Obj::create("PowerPoint.Application")?;
-    let mut guard = AppGuard::new(&app, AppKind::PowerPoint);
-    // PowerPoint 는 Word/Excel 과 달리 Visible=false 미지원 — 항상 가시 창으로 동작.
-    // 바꾼 값은 guard drop 에서 원래대로 되돌아간다 (사용자 인스턴스에 붙은 경우 대비).
-    guard.put_scoped("DisplayAlerts", var_i32(PP_ALERTS_NONE));
-    guard.put_scoped(
+fn extract_slides_with_app(app: &Obj, path: &Path) -> windows::core::Result<Vec<SlideText>> {
+    let mut settings = ScopedAppSettings::new(app);
+    settings.put("DisplayAlerts", var_i32(PP_ALERTS_NONE));
+    settings.put(
         "AutomationSecurity",
         var_i32(super::MSO_AUTOMATION_SECURITY_FORCE_DISABLE),
     );
@@ -106,46 +103,122 @@ fn extract_slides(path: &Path) -> windows::core::Result<Vec<SlideText>> {
     let pres_var = presentations.call(
         "Open",
         &[
-            var_str(&path_str), // FileName — 절대 경로
-            var_i32(MSO_TRUE),  // ReadOnly — 읽기 전용
-            var_i32(MSO_FALSE), // Untitled — 새 제목 부여 안 함
-            var_i32(MSO_FALSE), // WithWindow — PowerPoint 창 표시 안 함
+            var_str(&path_str),
+            var_i32(MSO_TRUE),
+            var_i32(MSO_FALSE),
+            var_i32(MSO_FALSE),
         ],
     )?;
     let pres = super::as_obj(&pres_var)?;
 
-    let slides_col = pres.get_obj("Slides", &[])?;
-    let count = slides_col.get_i32("Count", &[]);
-
-    let mut out: Vec<SlideText> = Vec::new();
-    for i in 1..=count {
-        let slide = match slides_col.get_obj("Item", &[var_i32(i)]) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let mut slide_text = collect_shape_text(&slide);
-        // 노트 페이지(발표자 메모) 텍스트 추가 — "[노트]" prefix 로 본문과 구분.
-        if let Ok(notes_page) = slide.get_obj("NotesPage", &[]) {
-            let note = collect_shape_text(&notes_page);
-            if !note.is_empty() {
-                if !slide_text.is_empty() {
-                    slide_text.push('\n');
+    let result = (|| {
+        let slides_col = pres.get_obj("Slides", &[])?;
+        let count = slides_col.get_i32("Count", &[]);
+        let mut out: Vec<SlideText> = Vec::new();
+        for i in 1..=count {
+            let slide = match slides_col.get_obj("Item", &[var_i32(i)]) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let mut slide_text = collect_shape_text(&slide);
+            if let Ok(notes_page) = slide.get_obj("NotesPage", &[]) {
+                let note = collect_shape_text(&notes_page);
+                if !note.is_empty() {
+                    if !slide_text.is_empty() {
+                        slide_text.push('\n');
+                    }
+                    slide_text.push_str("[노트] ");
+                    slide_text.push_str(&note);
                 }
-                slide_text.push_str("[노트] ");
-                slide_text.push_str(&note);
+            }
+            if !slide_text.is_empty() {
+                out.push(SlideText {
+                    slide_number: i as usize,
+                    text: slide_text,
+                });
             }
         }
-        if !slide_text.is_empty() {
-            out.push(SlideText {
-                slide_number: i as usize,
-                text: slide_text,
-            });
-        }
-    }
+        Ok(out)
+    })();
 
     let _ = pres.call("Close", &[]);
+    result
+}
 
-    Ok(out)
+struct PowerPointRequest {
+    path: PathBuf,
+    reply: mpsc::Sender<Result<Vec<SlideText>, ParseError>>,
+}
+
+static POWERPOINT_WORKER: OnceLock<Mutex<Option<mpsc::Sender<PowerPointRequest>>>> = OnceLock::new();
+
+fn powerpoint_worker_slot() -> &'static Mutex<Option<mpsc::Sender<PowerPointRequest>>> {
+    POWERPOINT_WORKER.get_or_init(|| Mutex::new(None))
+}
+
+fn start_powerpoint_worker() -> mpsc::Sender<PowerPointRequest> {
+    let (tx, rx) = mpsc::channel::<PowerPointRequest>();
+    std::thread::Builder::new()
+        .name("anything-powerpoint-com".into())
+        .spawn(move || {
+            let _com = ComApartment::init();
+            let app = match Obj::create("PowerPoint.Application") {
+                Ok(app) => app,
+                Err(e) => {
+                    let err = to_parse_error("PowerPoint.Application", &e);
+                    while let Ok(req) = rx.recv() {
+                        let _ = req.reply.send(Err(ParseError::ParseError(err.to_string())));
+                    }
+                    return;
+                }
+            };
+
+            tracing::info!("PowerPoint COM persistent session started");
+            while let Ok(req) = rx.recv() {
+                let result = extract_slides_with_app(&app, &req.path)
+                    .map_err(|e| to_parse_error("PowerPoint", &e));
+                let _ = req.reply.send(result);
+            }
+            quit_if_idle(&app, "Presentations");
+            tracing::info!("PowerPoint COM persistent session stopped");
+        })
+        .expect("failed to start PowerPoint COM worker");
+    tx
+}
+
+fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let req = PowerPointRequest {
+        path: path.to_path_buf(),
+        reply: reply_tx,
+    };
+    let sender = {
+        let mut slot = powerpoint_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(start_powerpoint_worker());
+        }
+        slot.as_ref().unwrap().clone()
+    };
+
+    if sender.send(req).is_err() {
+        let mut slot = powerpoint_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        *slot = None;
+        return Err(ParseError::ParseError(
+            "PowerPoint COM 세션이 종료되었습니다. 다음 파일에서 자동 재시작합니다.".into(),
+        ));
+    }
+
+    match reply_rx.recv_timeout(Duration::from_secs(25)) {
+        Ok(result) => result,
+        Err(_) => {
+            let mut slot = powerpoint_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+            *slot = None;
+            Err(ParseError::ParseError(format!(
+                "PowerPoint COM 세션 응답 타임아웃 (25초): {}",
+                path.display()
+            )))
+        }
+    }
 }
 
 /// 컨테이너(슬라이드 또는 노트 페이지) 내 모든 Shape 의 텍스트를 수집.
