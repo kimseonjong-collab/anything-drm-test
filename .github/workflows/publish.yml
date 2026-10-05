@@ -4,16 +4,38 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
 
 concurrency:
-  group: publish-${{ github.ref }}
+  group: publish-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
+  release-check:
+    name: Release trigger check
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]] && git log -1 --pretty=%B | head -1 | grep -q '^release:'; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Release gate — tag push 시 CI(tsc/cargo fmt/check/clippy/test) 를 먼저 통과시킨다.
   # ci.yml 을 workflow_call reuse 하므로 검증 본문은 한 곳에서 관리.
   validate:
     name: CI gate
+    needs: release-check
+    if: needs.release-check.outputs.should_publish == 'true'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -27,6 +49,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - uses: pnpm/action-setup@v4
 
@@ -92,7 +119,7 @@ jobs:
         id: notes
         shell: bash
         run: |
-          MSG=$(git log -1 --pretty=%B "${{ github.ref_name }}" | sed -e 's/^release: [^—]*—\s*//')
+          MSG=$(git log -1 --pretty=%B "${{ github.sha }}" | sed -e 's/^release: [^—]*—\s*//')
           {
             echo "body<<NOTES_EOF"
             echo "$MSG"
@@ -121,8 +148,8 @@ jobs:
         run: |
           $pdb = "src-tauri/target/release/docufinder.pdb"
           if (Test-Path $pdb) {
-            gh release upload "${{ github.ref_name }}" $pdb --clobber
-            Write-Host "Uploaded $pdb to release ${{ github.ref_name }}"
+            gh release upload "${{ steps.meta.outputs.tag }}" $pdb --clobber
+            Write-Host "Uploaded $pdb to release ${{ steps.meta.outputs.tag }}"
           } else {
             Write-Host "No PDB found at $pdb (release profile likely has strip enabled), skipping"
           }
@@ -168,7 +195,7 @@ jobs:
             exit 1
           }
           Write-Host "Downloaded WebView2 X64 standalone installer: $size bytes"
-          gh release upload "${{ github.ref_name }}" $out --clobber
+          gh release upload "${{ steps.meta.outputs.tag }}" $out --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -208,7 +235,7 @@ jobs:
             exit 1
           }
           Write-Host "Lite installer: $($setup.Name) ($([math]::Round($setup.Length / 1MB, 1)) MB)"
-          gh release upload "${{ github.ref_name }}" $setup.FullName --clobber
+          gh release upload "${{ steps.meta.outputs.tag }}" $setup.FullName --clobber
 
       # 내부망 검토 제출용 증빙 — lite 바이너리에 외부 호스트 문자열이 없어야 한다.
       # 하나라도 걸리면 online 경로가 lite 로 새어 들어간 것이므로 릴리스를 실패시킨다.
@@ -251,6 +278,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - uses: pnpm/action-setup@v4
 
@@ -356,7 +388,7 @@ jobs:
           if [ -z "$DMG" ]; then
             echo "no dmg artifact found"; exit 1
           fi
-          TAG="${{ github.ref_name }}"
+          TAG="${{ steps.meta.outputs.tag }}"
           # Windows job(tauri-action)의 release 생성과 레이스 주의 — 우리가 만든 draft 를
           # tauri-action 이 대체하면 create 의 asset 업로드가 404 로 죽는다 (v3.2.8 실사고:
           # view=없음 → create 시작 → 그 사이 Windows 가 release 생성 → 우리 draft 소멸).
