@@ -246,15 +246,14 @@ fn request_sheets(path: &Path) -> Result<Vec<SheetData>, ParseError> {
         ));
     }
 
-    match reply_rx.recv_timeout(Duration::from_secs(25)) {
+    match reply_rx.recv_timeout(Duration::from_secs(120)) {
         Ok(result) => result,
         Err(_) => {
-            let mut slot = excel_worker_slot()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *slot = None;
+            // DRM/Fasoo 문서는 Open이 오래 걸릴 수 있다. 응답 지연만으로 worker를
+            // 폐기하면 살아 있는 Excel 뒤에 새 Application이 생겨 프로세스가 증식한다.
+            // 기존 worker를 유지해 후속 요청도 같은 세션에 직렬화한다.
             Err(ParseError::ParseError(format!(
-                "Excel COM 세션 응답 타임아웃 (25초): {}",
+                "Excel COM 세션 응답 타임아웃 (120초): {}",
                 path.display()
             )))
         }
