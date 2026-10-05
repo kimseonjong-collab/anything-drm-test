@@ -171,15 +171,13 @@ fn request_text(path: &Path) -> Result<String, ParseError> {
         ));
     }
 
-    match reply_rx.recv_timeout(Duration::from_secs(25)) {
+    match reply_rx.recv_timeout(Duration::from_secs(120)) {
         Ok(result) => result,
         Err(_) => {
-            // Do not queue more work behind a hung COM call.  Detach this
-            // worker; the next request starts a fresh STA/Application session.
-            let mut slot = word_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
-            *slot = None;
+            // DRM/Fasoo 문서는 Open이 오래 걸릴 수 있다. timeout만으로 worker를
+            // 폐기하지 않는다. 기존 세션을 유지해 Office 프로세스 증식을 막는다.
             Err(ParseError::ParseError(format!(
-                "Word COM 세션 응답 타임아웃 (25초): {}",
+                "Word COM 세션 응답 타임아웃 (120초): {}",
                 path.display()
             )))
         }
