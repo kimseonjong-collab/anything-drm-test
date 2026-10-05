@@ -250,8 +250,8 @@ fn request_sheets(path: &Path) -> Result<Vec<SheetData>, ParseError> {
         Ok(result) => result,
         Err(_) => {
             let mut slot = excel_worker_slot()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             *slot = None;
             Err(ParseError::ParseError(format!(
                 "Excel COM 세션 응답 타임아웃 (25초): {}",
