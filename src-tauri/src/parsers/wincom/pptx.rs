@@ -9,8 +9,8 @@ use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::Duration;
 
 use super::{
-    quit_if_idle, to_parse_error, v_string, var_i32, var_str, ComApartment, Obj,
-    ScopedAppSettings, MSO_FALSE, MSO_TRUE,
+    quit_if_idle, to_parse_error, v_string, var_i32, var_str, ComApartment, Obj, ScopedAppSettings,
+    MSO_FALSE, MSO_TRUE,
 };
 use crate::parsers::{
     DocumentChunk, DocumentMetadata, ParseError, ParsedDocument, DEFAULT_CHUNK_OVERLAP,
@@ -150,7 +150,8 @@ struct PowerPointRequest {
     reply: mpsc::Sender<Result<Vec<SlideText>, ParseError>>,
 }
 
-static POWERPOINT_WORKER: OnceLock<Mutex<Option<mpsc::Sender<PowerPointRequest>>>> = OnceLock::new();
+static POWERPOINT_WORKER: OnceLock<Mutex<Option<mpsc::Sender<PowerPointRequest>>>> =
+    OnceLock::new();
 
 fn powerpoint_worker_slot() -> &'static Mutex<Option<mpsc::Sender<PowerPointRequest>>> {
     POWERPOINT_WORKER.get_or_init(|| Mutex::new(None))
@@ -193,7 +194,9 @@ fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
         reply: reply_tx,
     };
     let sender = {
-        let mut slot = powerpoint_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = powerpoint_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             *slot = Some(start_powerpoint_worker());
         }
@@ -201,7 +204,9 @@ fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
     };
 
     if sender.send(req).is_err() {
-        let mut slot = powerpoint_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = powerpoint_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *slot = None;
         return Err(ParseError::ParseError(
             "PowerPoint COM 세션이 종료되었습니다. 다음 파일에서 자동 재시작합니다.".into(),
@@ -211,7 +216,9 @@ fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
     match reply_rx.recv_timeout(Duration::from_secs(25)) {
         Ok(result) => result,
         Err(_) => {
-            let mut slot = powerpoint_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+            let mut slot = powerpoint_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
             *slot = None;
             Err(ParseError::ParseError(format!(
                 "PowerPoint COM 세션 응답 타임아웃 (25초): {}",
