@@ -217,8 +217,8 @@ fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
         Ok(result) => result,
         Err(_) => {
             let mut slot = powerpoint_worker_slot()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             *slot = None;
             Err(ParseError::ParseError(format!(
                 "PowerPoint COM 세션 응답 타임아웃 (25초): {}",
