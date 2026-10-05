@@ -237,8 +237,8 @@ pub fn upsert_file_fts_only(
     // RETURNING으로 INSERT/UPDATE 모두에서 id를 1회 쿼리로 획득
     // 핫패스: prepare_cached로 SQL 재컴파일 방지 (배치 인덱싱 시 파일마다 호출)
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO files (path, name, file_type, size, modified_at, indexed_at, fts_indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO files (path, name, file_type, size, modified_at, indexed_at, fts_indexed_at, verified_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(path) DO UPDATE SET
            name = excluded.name,
            file_type = excluded.file_type,
@@ -246,11 +246,12 @@ pub fn upsert_file_fts_only(
            modified_at = excluded.modified_at,
            indexed_at = excluded.indexed_at,
            fts_indexed_at = excluded.fts_indexed_at,
+           verified_at = excluded.verified_at,
            vector_indexed_at = NULL
          RETURNING id",
     )?;
     let file_id: i64 = stmt.query_row(
-        params![path, name, file_type, size, modified_at, now, now],
+        params![path, name, file_type, size, modified_at, now, now, now],
         |row| row.get(0),
     )?;
 
@@ -286,6 +287,23 @@ pub fn insert_file_metadata_only(
         })?;
 
     Ok(file_id)
+}
+
+/// 안전 수선에서 이미 v3.8.17+ 파서로 검증된 경로를 스트리밍한다.
+/// 신규/변경 인덱싱 성공 시 upsert_file_fts_only가 verified_at을 갱신한다.
+pub fn for_each_verified_path<F>(conn: &Connection, mut visit: F) -> Result<()>
+where
+    F: FnMut(&str),
+{
+    let mut stmt = conn.prepare_cached(
+        "SELECT path FROM files WHERE verified_at IS NOT NULL"
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(0)?;
+        visit(&path);
+    }
+    Ok(())
 }
 
 /// 벡터 인덱싱 대기 중인 청크
