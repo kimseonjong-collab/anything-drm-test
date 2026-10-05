@@ -6,7 +6,7 @@ use super::pool::get_connection;
 // ==================== 스키마 마이그레이션 ====================
 
 /// 현재 스키마 버전
-const CURRENT_SCHEMA_VERSION: i32 = 18;
+const CURRENT_SCHEMA_VERSION: i32 = 19;
 
 /// 스키마 버전 조회
 fn get_schema_version(conn: &Connection) -> i32 {
@@ -459,6 +459,25 @@ pub fn migrate_schema(conn: &Connection, db_path: &Path) -> Result<()> {
         }
         set_schema_version(conn, 18)?;
         tracing::info!("Schema migrated to v18 (files.garbled)");
+    }
+
+    // === v19: 안전 수선 검증 시각 ===
+    // v3.8.17의 안정화된 DRM/Office 파서로 본문을 실제 재검증한 파일만 기록한다.
+    // 기존 행은 NULL로 남겨 최초 '인덱스 수선' 때 한 번만 안전 재검증 대상이 된다.
+    // 이후 정상 신규/변경 인덱싱도 verified_at을 갱신하므로 반복 수선 비용을 피한다.
+    if get_schema_version(conn) == 18 {
+        if let Err(e) = conn.execute(
+            "ALTER TABLE files ADD COLUMN verified_at INTEGER",
+            [],
+        ) {
+            tracing::trace!("Migration v19: verified_at already exists: {}", e);
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_verified ON files(verified_at)",
+            [],
+        )?;
+        set_schema_version(conn, 19)?;
+        tracing::info!("Schema migrated to v19 (safe repair verification marker)");
     }
 
     tracing::info!(
