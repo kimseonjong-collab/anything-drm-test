@@ -7,6 +7,7 @@
 - Preserves existing indexed content when safe revalidation fails or encounters a cloud placeholder.
 - Keeps the stabilized persistent Office COM session alive for slow DRM documents instead of repeatedly creating Office processes.
 - Does not change `전체 다시 인덱싱`; safe repair never pre-deletes the current index.
+- Adds legacy Word `.doc` and PowerPoint `.ppt` to supported indexing formats and routes them through Office COM.
 
 ## [3.8.17] - 2026-10-05
 
