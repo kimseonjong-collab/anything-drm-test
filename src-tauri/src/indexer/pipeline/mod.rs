@@ -177,6 +177,7 @@ pub fn index_folder_fts_only(
         progress_callback,
         max_file_size_mb,
         false,
+        false,
         excluded_dirs,
         ocr_engine,
         vector_index,
@@ -204,6 +205,36 @@ pub fn resume_folder_fts(
         progress_callback,
         max_file_size_mb,
         true,
+        false,
+        excluded_dirs,
+        ocr_engine,
+        vector_index,
+    )
+}
+
+/// 안전 수선: 기존 본문을 지우지 않고 아직 검증되지 않은 지원 문서만 다시 읽는다.
+/// 성공한 파일은 verified_at이 기록되어 다음 수선부터 자동 스킵된다.
+#[allow(clippy::too_many_arguments)]
+pub fn safe_revalidate_folder_fts(
+    conn: &Connection,
+    folder_path: &Path,
+    recursive: bool,
+    cancel_flag: Arc<AtomicBool>,
+    progress_callback: Option<FtsProgressCallback>,
+    max_file_size_mb: u64,
+    excluded_dirs: &[String],
+    ocr_engine: SharedOcrEngine,
+    vector_index: Option<Arc<crate::search::vector::VectorIndex>>,
+) -> Result<FolderIndexResult, IndexError> {
+    index_folder_fts_impl(
+        conn,
+        folder_path,
+        recursive,
+        cancel_flag,
+        progress_callback,
+        max_file_size_mb,
+        false,
+        true,
         excluded_dirs,
         ocr_engine,
         vector_index,
@@ -219,6 +250,7 @@ fn index_folder_fts_impl(
     progress_callback: Option<FtsProgressCallback>,
     max_file_size_mb: u64,
     skip_indexed: bool,
+    only_unverified: bool,
     excluded_dirs: &[String],
     ocr_engine: SharedOcrEngine,
     vector_index: Option<Arc<crate::search::vector::VectorIndex>>,
@@ -326,7 +358,7 @@ fn index_folder_fts_impl(
         })
         .collect();
 
-    if !metadata_docs.is_empty() {
+    if !only_unverified && !metadata_docs.is_empty() {
         tracing::info!(
             "[FTS] Storing metadata for {} document files",
             metadata_docs.len()
@@ -347,6 +379,30 @@ fn index_folder_fts_impl(
             }
         }
         let _ = conn.execute_batch("COMMIT");
+    }
+
+    // 안전 수선: verified_at이 있는 파일은 이미 현재 파서로 성공 검증됐으므로 스킵.
+    // 기존 DB 행은 migration v19에서 NULL로 유지되어 최초 수선 때 한 번만 재검증된다.
+    if only_unverified {
+        let drive_map = crate::utils::network_path::network_drive_map();
+        let mut verified: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Err(e) = crate::db::for_each_verified_path(conn, |p| {
+            verified.insert(crate::utils::network_path::normalize_for_compare(
+                std::path::Path::new(p),
+                &drive_map,
+            ));
+        }) {
+            tracing::warn!("[Safe Repair] verified-path scan failed: {}", e);
+        }
+        let before = file_paths.len();
+        file_paths.retain(|p| {
+            !verified.contains(&crate::utils::network_path::normalize_for_compare(p, &drive_map))
+        });
+        tracing::info!(
+            "[Safe Repair] {} unverified supported files selected ({} already verified skipped)",
+            file_paths.len(),
+            before - file_paths.len()
+        );
     }
 
     // skip_indexed: 이미 인덱싱된 파일 제외 (resume 용)
@@ -571,26 +627,32 @@ fn index_folder_fts_impl(
                                     } else {
                                         suppressed_errors += 1;
                                     }
-                                    // 본문 저장은 실패했어도 파일명 검색은 되게 메타데이터만 남긴다
-                                    if let Err(e) = save_file_metadata_only(
-                                        conn,
-                                        &path,
-                                        vector_index.as_deref(),
-                                    ) {
-                                        tracing::warn!(
-                                            "Failed to save metadata after save failure for {:?}: {}",
-                                            path,
-                                            e
-                                        );
+                                    // 안전 수선은 실패 시 기존 본문을 절대 지우지 않는다.
+                                    // 일반 인덱싱만 기존 동작대로 메타데이터-only로 남긴다.
+                                    if !only_unverified {
+                                        if let Err(e) = save_file_metadata_only(
+                                            conn,
+                                            &path,
+                                            vector_index.as_deref(),
+                                        ) {
+                                            tracing::warn!(
+                                                "Failed to save metadata after save failure for {:?}: {}",
+                                                path,
+                                                e
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
                         ParseResult::Failure { path, error } => {
-                            if let Err(e) =
-                                save_file_metadata_only(conn, &path, vector_index.as_deref())
-                            {
-                                tracing::warn!("Failed to save metadata for {:?}: {}", path, e);
+                            // 안전 수선에서는 실패한 재검증이 기존 정상/부분 본문을 지우지 않는다.
+                            if !only_unverified {
+                                if let Err(e) =
+                                    save_file_metadata_only(conn, &path, vector_index.as_deref())
+                                {
+                                    tracing::warn!("Failed to save metadata for {:?}: {}", path, e);
+                                }
                             }
                             failed += 1;
                             if errors.len() < MAX_INDEXING_ERRORS {
@@ -602,8 +664,13 @@ fn index_folder_fts_impl(
                             // throttled
                         }
                         ParseResult::CloudSkipped { path } => {
-                            // OneDrive 등 클라우드 placeholder: 본문 다운로드 회피.
-                            // 메타데이터만 저장해 파일명 검색은 가능하게 두고, 실패로는 분류하지 않는다.
+                            // 안전 수선에서는 placeholder 때문에 기존 본문을 지우지 않는다.
+                            if only_unverified {
+                                cloud_skipped += 1;
+                                send_progress("indexing", total, processed, None, false);
+                                continue;
+                            }
+                            // 일반 인덱싱: 메타데이터만 저장해 파일명 검색은 가능하게 둔다.
                             if let Err(e) =
                                 save_file_metadata_only(conn, &path, vector_index.as_deref())
                             {
