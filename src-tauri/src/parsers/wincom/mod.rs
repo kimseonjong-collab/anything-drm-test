@@ -278,6 +278,60 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 // ============================================================================
+// Persistent Office session helpers
+// ============================================================================
+
+/// A short-lived guard for application-global settings while a persistent
+/// Office Application object is reused by the dedicated STA worker.
+///
+/// Unlike `AppGuard`, this guard NEVER calls Application.Quit().  It exists
+/// specifically so a persistent session can restore user-visible/global Office
+/// settings after every document while keeping the COM Application alive.
+pub(crate) struct ScopedAppSettings {
+    app: Obj,
+    saved: Vec<(&'static str, VARIANT)>,
+}
+
+impl ScopedAppSettings {
+    pub(crate) fn new(app: &Obj) -> Self {
+        Self {
+            app: app.clone(),
+            saved: Vec::new(),
+        }
+    }
+
+    pub(crate) fn put(&mut self, name: &'static str, value: VARIANT) {
+        if let Ok(original) = self.app.get(name, &[]) {
+            self.saved.push((name, original));
+        }
+        let _ = self.app.put(name, value);
+    }
+}
+
+impl Drop for ScopedAppSettings {
+    fn drop(&mut self) {
+        let saved = std::mem::take(&mut self.saved);
+        for (name, original) in saved.into_iter().rev() {
+            let _ = self.app.put(name, original);
+        }
+    }
+}
+
+/// Best-effort shutdown used only when a dedicated persistent worker exits.
+/// It will not close an Office application that still has open documents.
+pub(crate) fn quit_if_idle(app: &Obj, collection_name: &str) {
+    let count = app
+        .get_obj(collection_name, &[])
+        .and_then(|collection| collection.get("Count", &[]))
+        .ok()
+        .and_then(|v| i32::try_from(&v).ok());
+
+    if matches!(count, Some(0)) {
+        let _ = app.call("Quit", &[]);
+    }
+}
+
+// ============================================================================
 // Application 객체 수명 가드
 // ============================================================================
 
