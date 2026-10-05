@@ -466,10 +466,7 @@ pub fn migrate_schema(conn: &Connection, db_path: &Path) -> Result<()> {
     // 기존 행은 NULL로 남겨 최초 '인덱스 수선' 때 한 번만 안전 재검증 대상이 된다.
     // 이후 정상 신규/변경 인덱싱도 verified_at을 갱신하므로 반복 수선 비용을 피한다.
     if get_schema_version(conn) == 18 {
-        if let Err(e) = conn.execute(
-            "ALTER TABLE files ADD COLUMN verified_at INTEGER",
-            [],
-        ) {
+        if let Err(e) = conn.execute("ALTER TABLE files ADD COLUMN verified_at INTEGER", []) {
             tracing::trace!("Migration v19: verified_at already exists: {}", e);
         }
         conn.execute(
