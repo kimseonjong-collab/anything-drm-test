@@ -135,7 +135,14 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'Anything v__VERSION__'
-          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseBody: |
+            ## Windows 설치 안내
+            **일반 사용자 / 기존 인덱스 유지:** `Anything___VERSION___x64-setup.exe`
+            
+            ⚠️ `Anything.Lite_*` 는 내부망 전용 별도 앱입니다. 일반판과 데이터 경로가 다르므로 기존 Anything 인덱스가 표시되지 않습니다.
+            
+            ---
+            ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: false
@@ -234,8 +241,11 @@ jobs:
             Write-Error "Lite installer 를 찾지 못했다. $nsis 내용: $((Get-ChildItem $nsis -ErrorAction SilentlyContinue).Name -join ', ')"
             exit 1
           }
-          Write-Host "Lite installer: $($setup.Name) ($([math]::Round($setup.Length / 1MB, 1)) MB)"
-          gh release upload "${{ steps.meta.outputs.tag }}" $setup.FullName --clobber
+          $safeName = "INTERNAL_ONLY_$($setup.Name)"
+          $safePath = Join-Path $setup.DirectoryName $safeName
+          Copy-Item $setup.FullName $safePath -Force
+          Write-Host "Lite installer (internal only): $safeName ($([math]::Round($setup.Length / 1MB, 1)) MB)"
+          gh release upload "${{ steps.meta.outputs.tag }}" $safePath --clobber
 
       # 내부망 검토 제출용 증빙 — lite 바이너리에 외부 호스트 문자열이 없어야 한다.
       # 하나라도 걸리면 online 경로가 lite 로 새어 들어간 것이므로 릴리스를 실패시킨다.
