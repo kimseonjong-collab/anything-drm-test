@@ -295,9 +295,7 @@ pub fn for_each_verified_path<F>(conn: &Connection, mut visit: F) -> Result<()>
 where
     F: FnMut(&str),
 {
-    let mut stmt = conn.prepare_cached(
-        "SELECT path FROM files WHERE verified_at IS NOT NULL"
-    )?;
+    let mut stmt = conn.prepare_cached("SELECT path FROM files WHERE verified_at IS NOT NULL")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let path: String = row.get(0)?;
