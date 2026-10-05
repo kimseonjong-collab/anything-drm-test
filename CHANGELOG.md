@@ -1,4 +1,11 @@
 # Changelog
+## [3.8.16] - 2026-10-05
+
+### Changed
+- Release-only version bump to validate the automated GitHub Release pipeline after v3.8.15.
+- No application behavior or indexing logic changes.
+
+
 ## [3.8.15] - 2026-10-05
 
 ### Fixed
