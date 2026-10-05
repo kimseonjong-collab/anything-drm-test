@@ -1,4 +1,13 @@
 # Changelog
+## [3.8.18] - 2026-10-05
+
+### Fixed
+- Upgrades `인덱스 수선` to a two-stage non-destructive repair: retry incomplete files first, then revalidate legacy supported documents once.
+- Adds a per-file verification marker so successfully revalidated documents are skipped by future repairs.
+- Preserves existing indexed content when safe revalidation fails or encounters a cloud placeholder.
+- Keeps the stabilized persistent Office COM session alive for slow DRM documents instead of repeatedly creating Office processes.
+- Does not change `전체 다시 인덱싱`; safe repair never pre-deletes the current index.
+
 ## [3.8.17] - 2026-10-05
 
 ### Fixed
