@@ -3,10 +3,13 @@
 //! `parsers::docx` (Rust ZIP/XML 파서) 실패 시 `wincom_fallback_docx` 에서 호출.
 //! 설치된 Word 로 문서를 열어 `Content.Text` 를 추출한다.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::Duration;
 
 use super::{
-    to_parse_error, v_string, var_bool, var_i32, var_str, AppGuard, AppKind, ComApartment, Obj,
+    quit_if_idle, to_parse_error, v_string, var_bool, var_i32, var_str, ComApartment, Obj,
+    ScopedAppSettings,
 };
 use crate::parsers::{
     DocumentChunk, DocumentMetadata, ParseError, ParsedDocument, DEFAULT_CHUNK_OVERLAP,
@@ -34,9 +37,7 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
         }
     }
 
-    let _com = ComApartment::init();
-
-    let full_text = extract_text(path).map_err(|e| to_parse_error("Word", &e))?;
+    let full_text = request_text(path)?;
     let pages = split_pages(&full_text);
     if pages.is_empty() {
         tracing::warn!("DOCX(COM) file has no text content: {:?}", path);
@@ -71,15 +72,12 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
 /// Application 객체 생성 → 보안 설정(Visible/DisplayAlerts/ScreenUpdating/AutomationSecurity)
 /// → `Documents.Open` → `Content.Text` 읽기 → `Close` 순서로 동작.
 /// Open 시 가짜 암호를 전달해 보호된 문서의 모달 다이얼로그를 차단한다.
-fn extract_text(path: &Path) -> windows::core::Result<String> {
-    let app = Obj::create("Word.Application")?;
-    let mut guard = AppGuard::new(&app, AppKind::Word);
-    // Word 를 백그라운드로 실행 — 경고·화면 갱신·매크로 모두 차단.
-    // 사용자가 켜 둔 Word 인스턴스에 붙었을 수 있으므로 전부 put_scoped (drop 에서 복원).
-    guard.put_scoped("Visible", var_bool(false));
-    guard.put_scoped("DisplayAlerts", var_i32(WD_ALERTS_NONE));
-    guard.put_scoped("ScreenUpdating", var_bool(false));
-    guard.put_scoped(
+fn extract_text_with_app(app: &Obj, path: &Path) -> windows::core::Result<String> {
+    let mut settings = ScopedAppSettings::new(app);
+    settings.put("Visible", var_bool(false));
+    settings.put("DisplayAlerts", var_i32(WD_ALERTS_NONE));
+    settings.put("ScreenUpdating", var_bool(false));
+    settings.put(
         "AutomationSecurity",
         var_i32(super::MSO_AUTOMATION_SECURITY_FORCE_DISABLE),
     );
@@ -89,23 +87,103 @@ fn extract_text(path: &Path) -> windows::core::Result<String> {
     let doc_var = documents.call(
         "Open",
         &[
-            var_str(&path_str),             // FileName — 절대 경로
-            var_bool(false),                // ConfirmConversions — 변환 확인 대화상자 비활성
-            var_bool(true),                 // ReadOnly — 읽기 전용
-            var_bool(false),                // AddToRecentFiles — 최근 문서 목록 추가 안 함
-            var_str(super::BOGUS_PASSWORD), // PasswordDocument — 가짜 암호 (보호 문서 즉시 실패)
+            var_str(&path_str),
+            var_bool(false),
+            var_bool(true),
+            var_bool(false),
+            var_str(super::BOGUS_PASSWORD),
         ],
     )?;
     let doc = super::as_obj(&doc_var)?;
 
-    // Content 객체의 Text 속성에서 전체 문서 텍스트를 한 번에 읽는다.
-    let content = doc.get_obj("Content", &[])?;
-    let text_var = content.get("Text", &[])?;
-    let text = v_string(&text_var);
+    let result = (|| {
+        let content = doc.get_obj("Content", &[])?;
+        let text_var = content.get("Text", &[])?;
+        Ok(v_string(&text_var))
+    })();
 
+    // Always close the document even when extraction failed.
     let _ = doc.call("Close", &[var_i32(WD_DO_NOT_SAVE_CHANGES)]);
+    result
+}
 
-    Ok(text)
+struct WordRequest {
+    path: PathBuf,
+    reply: mpsc::Sender<Result<String, ParseError>>,
+}
+
+static WORD_WORKER: OnceLock<Mutex<Option<mpsc::Sender<WordRequest>>>> = OnceLock::new();
+
+fn word_worker_slot() -> &'static Mutex<Option<mpsc::Sender<WordRequest>>> {
+    WORD_WORKER.get_or_init(|| Mutex::new(None))
+}
+
+fn start_word_worker() -> mpsc::Sender<WordRequest> {
+    let (tx, rx) = mpsc::channel::<WordRequest>();
+    std::thread::Builder::new()
+        .name("anything-word-com".into())
+        .spawn(move || {
+            let _com = ComApartment::init();
+            let app = match Obj::create("Word.Application") {
+                Ok(app) => app,
+                Err(e) => {
+                    let err = to_parse_error("Word.Application", &e);
+                    while let Ok(req) = rx.recv() {
+                        let _ = req.reply.send(Err(ParseError::ParseError(err.to_string())));
+                    }
+                    return;
+                }
+            };
+
+            tracing::info!("Word COM persistent session started");
+            while let Ok(req) = rx.recv() {
+                let result =
+                    extract_text_with_app(&app, &req.path).map_err(|e| to_parse_error("Word", &e));
+                let _ = req.reply.send(result);
+            }
+            quit_if_idle(&app, "Documents");
+            tracing::info!("Word COM persistent session stopped");
+        })
+        .expect("failed to start Word COM worker");
+    tx
+}
+
+fn request_text(path: &Path) -> Result<String, ParseError> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let req = WordRequest {
+        path: path.to_path_buf(),
+        reply: reply_tx,
+    };
+
+    let sender = {
+        let mut slot = word_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(start_word_worker());
+        }
+        slot.as_ref().unwrap().clone()
+    };
+
+    if sender.send(req).is_err() {
+        let mut slot = word_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        *slot = None;
+        return Err(ParseError::ParseError(
+            "Word COM 세션이 종료되었습니다. 다음 파일에서 자동 재시작합니다.".into(),
+        ));
+    }
+
+    match reply_rx.recv_timeout(Duration::from_secs(25)) {
+        Ok(result) => result,
+        Err(_) => {
+            // Do not queue more work behind a hung COM call.  Detach this
+            // worker; the next request starts a fresh STA/Application session.
+            let mut slot = word_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+            *slot = None;
+            Err(ParseError::ParseError(format!(
+                "Word COM 세션 응답 타임아웃 (25초): {}",
+                path.display()
+            )))
+        }
+    }
 }
 
 /// 페이지별 텍스트 정보 (페이지 번호 + 텍스트 + 전문 기준 시작 오프셋).
