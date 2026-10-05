@@ -1,4 +1,11 @@
 # Changelog
+## [3.8.14] - 2026-10-05
+
+### Fixed
+- Fixed Windows release packaging by disabling broken updater signing until a valid Tauri updater signing key is configured.
+- Preserves the v3.8.13 safe `인덱스 수선` behavior and produces the normal Windows NSIS installer.
+
+
 ## [3.8.13] - 2026-10-05
 
 ### Fixed
