@@ -1,4 +1,12 @@
 # Changelog
+## [3.8.15] - 2026-10-05
+
+### Fixed
+- Windows release packaging no longer requests updater signing artifacts when no private signing key is configured.
+- Release publishing is automated from `release:` merges to `main`; manual tag/Release creation is no longer required.
+- Preserves the safe DRM/network `인덱스 수선` behavior introduced in v3.8.13.
+
+
 ## [3.8.14] - 2026-10-05
 
 ### Fixed
