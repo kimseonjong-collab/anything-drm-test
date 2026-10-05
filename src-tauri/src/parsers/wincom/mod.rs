@@ -278,77 +278,56 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 // ============================================================================
-// Application 객체 수명 가드
+// Persistent Office session helpers
 // ============================================================================
 
-pub(crate) enum AppKind {
-    Word,
-    Excel,
-    PowerPoint,
-}
-
-impl AppKind {
-    fn collection_name(&self) -> &'static str {
-        match self {
-            Self::Word => "Documents",
-            Self::Excel => "Workbooks",
-            Self::PowerPoint => "Presentations",
-        }
-    }
-}
-
-/// Application 객체의 RAII 가드 — 우리가 바꾼 앱 전역 설정을 되돌리고,
-/// 열린 문서가 남지 않은 인스턴스만 `Quit` 으로 종료한다.
+/// A short-lived guard for application-global settings while a persistent
+/// Office Application object is reused by the dedicated STA worker.
 ///
-/// Word·PowerPoint 는 단일 인스턴스 자동화 서버라 사용자가 앱을 이미 켜 둔 상태면
-/// `CoCreateInstance` 가 새 프로세스를 띄우는 대신 **그 인스턴스에 붙는다**. 이때
-/// 무조건 `Quit` 하면 사용자가 편집 중이던 문서까지 닫히고(`DisplayAlerts` 를 꺼 둔
-/// 탓에 저장 확인 없이), `Visible=false` · `ScreenUpdating=false` 같은 전역 설정도
-/// 그대로 남아 앱이 먹통처럼 보인다. 그래서
-/// ① `put_scoped` 로 바꾼 값은 drop 에서 원래 값으로 되돌리고,
-/// ② 열린 문서 수가 0 일 때만 Quit 한다 (우리가 연 문서는 그전에 Close 된다).
-/// 조회 실패 시에도 Quit 하지 않는다 — 이미 죽은 인스턴스라 Quit 도 실패한다.
-pub(crate) struct AppGuard {
+/// Unlike `AppGuard`, this guard NEVER calls Application.Quit().  It exists
+/// specifically so a persistent session can restore user-visible/global Office
+/// settings after every document while keeping the COM Application alive.
+pub(crate) struct ScopedAppSettings {
     app: Obj,
-    kind: AppKind,
-    /// `put_scoped` 로 덮어쓴 속성의 원래 값 (설정한 순서대로).
     saved: Vec<(&'static str, VARIANT)>,
 }
 
-impl AppGuard {
-    pub(crate) fn new(app: &Obj, kind: AppKind) -> Self {
-        AppGuard {
+impl ScopedAppSettings {
+    pub(crate) fn new(app: &Obj) -> Self {
+        Self {
             app: app.clone(),
-            kind,
             saved: Vec::new(),
         }
     }
 
-    /// 앱 전역 속성을 원래 값으로 백업한 뒤 새 값으로 설정한다 (drop 에서 복원).
-    /// 읽기가 실패하는 속성(해당 앱이 지원하지 않음)은 설정만 하고 복원 대상에서 뺀다.
-    pub(crate) fn put_scoped(&mut self, name: &'static str, value: VARIANT) {
+    pub(crate) fn put(&mut self, name: &'static str, value: VARIANT) {
         if let Ok(original) = self.app.get(name, &[]) {
             self.saved.push((name, original));
         }
         let _ = self.app.put(name, value);
     }
-
-    fn collection_size(&self) -> windows::core::Result<i32> {
-        let collection = self.app.get_obj(self.kind.collection_name(), &[])?;
-        let count = collection.get("Count", &[])?;
-        i32::try_from(&count)
-    }
 }
 
-impl Drop for AppGuard {
+impl Drop for ScopedAppSettings {
     fn drop(&mut self) {
         let saved = std::mem::take(&mut self.saved);
         for (name, original) in saved.into_iter().rev() {
             let _ = self.app.put(name, original);
         }
-        if matches!(self.collection_size(), Ok(0)) {
-            let _ = self.app.call("Quit", &[]);
-        }
+    }
+}
+
+/// Best-effort shutdown used only when a dedicated persistent worker exits.
+/// It will not close an Office application that still has open documents.
+pub(crate) fn quit_if_idle(app: &Obj, collection_name: &str) {
+    let count = app
+        .get_obj(collection_name, &[])
+        .and_then(|collection| collection.get("Count", &[]))
+        .ok()
+        .and_then(|v| i32::try_from(&v).ok());
+
+    if matches!(count, Some(0)) {
+        let _ = app.call("Quit", &[]);
     }
 }
 

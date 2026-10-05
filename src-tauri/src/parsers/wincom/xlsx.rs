@@ -6,7 +6,9 @@
 //! 포맷의 fallback 역할을 한다.
 
 use std::ffi::c_void;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::Duration;
 
 use windows::Win32::System::Com::SAFEARRAY;
 use windows::Win32::System::Ole::{
@@ -15,8 +17,8 @@ use windows::Win32::System::Ole::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_R8};
 
 use super::{
-    to_parse_error, v_is_array, v_is_empty, v_string, v_to_display_string, var_bool, var_i32,
-    var_str, AppGuard, AppKind, ComApartment, Obj,
+    quit_if_idle, to_parse_error, v_is_array, v_is_empty, v_string, v_to_display_string, var_bool,
+    var_i32, var_str, ComApartment, Obj, ScopedAppSettings,
 };
 use crate::parsers::{
     DocumentChunk, DocumentMetadata, ParseError, ParsedDocument, DEFAULT_CHUNK_OVERLAP,
@@ -49,9 +51,7 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
         }
     }
 
-    let _com = ComApartment::init();
-
-    let sheets = extract_sheets(path).map_err(|e| to_parse_error("Excel", &e))?;
+    let sheets = request_sheets(path)?;
 
     let mut all_text = String::new();
     let mut chunks = Vec::new();
@@ -124,18 +124,14 @@ struct SheetData {
 ///
 /// Application → `Workbooks.Open` → `Worksheets` 컬렉션 순회 →
 /// 각 시트의 `UsedRange.Value` (2차원 SAFEARRAY) 를 행별 문자열로 변환.
-fn extract_sheets(path: &Path) -> windows::core::Result<Vec<SheetData>> {
-    let app = Obj::create("Excel.Application")?;
-    let mut guard = AppGuard::new(&app, AppKind::Excel);
-    // Excel 을 백그라운드로 실행 — 경고·이벤트·링크 갱신·매크로 모두 차단.
-    // 사용자가 켜 둔 Excel 인스턴스에 붙었을 수 있으므로 전부 put_scoped (drop 에서 복원).
-    // 특히 EnableEvents=false 가 남으면 사용자 통합문서의 매크로 이벤트가 죽는다.
-    guard.put_scoped("Visible", var_bool(false));
-    guard.put_scoped("DisplayAlerts", var_bool(false));
-    guard.put_scoped("ScreenUpdating", var_bool(false));
-    guard.put_scoped("EnableEvents", var_bool(false));
-    guard.put_scoped("AskToUpdateLinks", var_bool(false));
-    guard.put_scoped(
+fn extract_sheets_with_app(app: &Obj, path: &Path) -> windows::core::Result<Vec<SheetData>> {
+    let mut settings = ScopedAppSettings::new(app);
+    settings.put("Visible", var_bool(false));
+    settings.put("DisplayAlerts", var_bool(false));
+    settings.put("ScreenUpdating", var_bool(false));
+    settings.put("EnableEvents", var_bool(false));
+    settings.put("AskToUpdateLinks", var_bool(false));
+    settings.put(
         "AutomationSecurity",
         var_i32(super::MSO_AUTOMATION_SECURITY_FORCE_DISABLE),
     );
@@ -145,46 +141,124 @@ fn extract_sheets(path: &Path) -> windows::core::Result<Vec<SheetData>> {
     let wb_var = workbooks.call(
         "Open",
         &[
-            var_str(&path_str),             // FileName — 절대 경로
-            var_i32(0),                     // UpdateLinks — 외부 링크 갱신 안 함
-            var_bool(true),                 // ReadOnly — 읽기 전용
-            super::missing_arg(),           // Format — 생략 (기본 형식 자동 감지)
-            var_str(super::BOGUS_PASSWORD), // Password — 가짜 암호 (보호 문서 즉시 실패)
+            var_str(&path_str),
+            var_i32(0),
+            var_bool(true),
+            super::missing_arg(),
+            var_str(super::BOGUS_PASSWORD),
         ],
     )?;
     let wb = super::as_obj(&wb_var)?;
 
-    let worksheets = wb.get_obj("Worksheets", &[])?;
-    let count = worksheets.get_i32("Count", &[]);
-
-    let mut out: Vec<SheetData> = Vec::new();
-    for i in 1..=count {
-        let sheet = match worksheets.get_obj("Item", &[var_i32(i)]) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let name = sheet.get_string("Name", &[]);
-
-        // UsedRange — 데이터가 있는 범위만 추출 (빈 시트 제외).
-        let used = match sheet.get_obj("UsedRange", &[]) {
-            Ok(u) => u,
-            Err(_) => continue,
-        };
-        let first_row = used.get_i32("Row", &[]).max(1) as usize;
-
-        // UsedRange.Value — 2차원 SAFEARRAY (행 × 열). 단일 셀인 경우 스칼라 VARIANT.
-        let value = match used.get("Value", &[]) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let rows = read_used_range(&value, first_row);
-        out.push(SheetData { name, rows });
-    }
+    let result = (|| {
+        let worksheets = wb.get_obj("Worksheets", &[])?;
+        let count = worksheets.get_i32("Count", &[]);
+        let mut out: Vec<SheetData> = Vec::new();
+        for i in 1..=count {
+            let sheet = match worksheets.get_obj("Item", &[var_i32(i)]) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let name = sheet.get_string("Name", &[]);
+            let used = match sheet.get_obj("UsedRange", &[]) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let first_row = used.get_i32("Row", &[]).max(1) as usize;
+            let value = match used.get("Value", &[]) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let rows = read_used_range(&value, first_row);
+            out.push(SheetData { name, rows });
+        }
+        Ok(out)
+    })();
 
     let _ = wb.call("Close", &[var_bool(false)]);
+    result
+}
 
-    Ok(out)
+struct ExcelRequest {
+    path: PathBuf,
+    reply: mpsc::Sender<Result<Vec<SheetData>, ParseError>>,
+}
+
+static EXCEL_WORKER: OnceLock<Mutex<Option<mpsc::Sender<ExcelRequest>>>> = OnceLock::new();
+
+fn excel_worker_slot() -> &'static Mutex<Option<mpsc::Sender<ExcelRequest>>> {
+    EXCEL_WORKER.get_or_init(|| Mutex::new(None))
+}
+
+fn start_excel_worker() -> mpsc::Sender<ExcelRequest> {
+    let (tx, rx) = mpsc::channel::<ExcelRequest>();
+    std::thread::Builder::new()
+        .name("anything-excel-com".into())
+        .spawn(move || {
+            let _com = ComApartment::init();
+            let app = match Obj::create("Excel.Application") {
+                Ok(app) => app,
+                Err(e) => {
+                    let err = to_parse_error("Excel.Application", &e);
+                    while let Ok(req) = rx.recv() {
+                        let _ = req.reply.send(Err(ParseError::ParseError(err.to_string())));
+                    }
+                    return;
+                }
+            };
+
+            tracing::info!("Excel COM persistent session started");
+            while let Ok(req) = rx.recv() {
+                let result = extract_sheets_with_app(&app, &req.path)
+                    .map_err(|e| to_parse_error("Excel", &e));
+                let _ = req.reply.send(result);
+            }
+            quit_if_idle(&app, "Workbooks");
+            tracing::info!("Excel COM persistent session stopped");
+        })
+        .expect("failed to start Excel COM worker");
+    tx
+}
+
+fn request_sheets(path: &Path) -> Result<Vec<SheetData>, ParseError> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let req = ExcelRequest {
+        path: path.to_path_buf(),
+        reply: reply_tx,
+    };
+    let sender = {
+        let mut slot = excel_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(start_excel_worker());
+        }
+        slot.as_ref().unwrap().clone()
+    };
+
+    if sender.send(req).is_err() {
+        let mut slot = excel_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *slot = None;
+        return Err(ParseError::ParseError(
+            "Excel COM 세션이 종료되었습니다. 다음 파일에서 자동 재시작합니다.".into(),
+        ));
+    }
+
+    match reply_rx.recv_timeout(Duration::from_secs(25)) {
+        Ok(result) => result,
+        Err(_) => {
+            let mut slot = excel_worker_slot()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *slot = None;
+            Err(ParseError::ParseError(format!(
+                "Excel COM 세션 응답 타임아웃 (25초): {}",
+                path.display()
+            )))
+        }
+    }
 }
 
 /// `UsedRange.Value` (SAFEARRAY 또는 스칼라) 를 행별 문자열로 변환.

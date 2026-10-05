@@ -1,4 +1,12 @@
 # Changelog
+## [3.8.17] - 2026-10-05
+
+### Fixed
+- Reuses bounded persistent Office COM sessions during DRM fallback indexing instead of creating a new Excel/Word/PowerPoint application for every document.
+- Keeps each document lifecycle isolated: open, extract, close; application-global settings are restored after each document.
+- Detaches a COM worker after a 25-second response timeout so later documents are not queued behind a hung Office session.
+- Preserves the existing database/index and safe repair behavior; no destructive reindex is triggered by this release.
+
 ## [3.8.16] - 2026-10-05
 
 ### Changed
