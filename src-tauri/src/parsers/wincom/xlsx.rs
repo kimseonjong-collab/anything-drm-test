@@ -17,8 +17,8 @@ use windows::Win32::System::Ole::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_R8};
 
 use super::{
-    to_parse_error, v_is_array, v_is_empty, v_string, v_to_display_string, var_bool, var_i32,
-    var_str, ComApartment, Obj, ScopedAppSettings, quit_if_idle,
+    quit_if_idle, to_parse_error, v_is_array, v_is_empty, v_string, v_to_display_string, var_bool,
+    var_i32, var_str, ComApartment, Obj, ScopedAppSettings,
 };
 use crate::parsers::{
     DocumentChunk, DocumentMetadata, ParseError, ParsedDocument, DEFAULT_CHUNK_OVERLAP,
@@ -227,7 +227,9 @@ fn request_sheets(path: &Path) -> Result<Vec<SheetData>, ParseError> {
         reply: reply_tx,
     };
     let sender = {
-        let mut slot = excel_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = excel_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             *slot = Some(start_excel_worker());
         }
@@ -235,7 +237,9 @@ fn request_sheets(path: &Path) -> Result<Vec<SheetData>, ParseError> {
     };
 
     if sender.send(req).is_err() {
-        let mut slot = excel_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = excel_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *slot = None;
         return Err(ParseError::ParseError(
             "Excel COM 세션이 종료되었습니다. 다음 파일에서 자동 재시작합니다.".into(),
@@ -245,7 +249,9 @@ fn request_sheets(path: &Path) -> Result<Vec<SheetData>, ParseError> {
     match reply_rx.recv_timeout(Duration::from_secs(25)) {
         Ok(result) => result,
         Err(_) => {
-            let mut slot = excel_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+            let mut slot = excel_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
             *slot = None;
             Err(ParseError::ParseError(format!(
                 "Excel COM 세션 응답 타임아웃 (25초): {}",
