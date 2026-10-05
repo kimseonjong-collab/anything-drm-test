@@ -213,15 +213,13 @@ fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
         ));
     }
 
-    match reply_rx.recv_timeout(Duration::from_secs(25)) {
+    match reply_rx.recv_timeout(Duration::from_secs(120)) {
         Ok(result) => result,
         Err(_) => {
-            let mut slot = powerpoint_worker_slot()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *slot = None;
+            // DRM/Fasoo 문서는 Open이 오래 걸릴 수 있다. timeout만으로 worker를
+            // 폐기하지 않고 같은 PowerPoint 세션을 유지한다.
             Err(ParseError::ParseError(format!(
-                "PowerPoint COM 세션 응답 타임아웃 (25초): {}",
+                "PowerPoint COM 세션 응답 타임아웃 (120초): {}",
                 path.display()
             )))
         }

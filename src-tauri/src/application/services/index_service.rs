@@ -130,6 +130,44 @@ impl IndexService {
         Ok(result)
     }
 
+    /// 안전 수선 2단계: 아직 verified_at이 없는 지원 문서만 비파괴 재검증.
+    pub async fn safe_revalidate_folder_fts(
+        &self,
+        path: &Path,
+        include_subfolders: bool,
+        progress_callback: Option<FtsProgressCallback>,
+        max_file_size_mb: u64,
+        excluded_dirs: Vec<String>,
+    ) -> AppResult<FolderIndexResult> {
+        self.validate_path(path)?;
+        self.cancel_flag.store(false, Ordering::Relaxed);
+
+        let conn = self.get_connection()?;
+        let path_buf = path.to_path_buf();
+        let cancel_flag = self.cancel_flag.clone();
+        let ocr_engine = self.ocr_engine.clone();
+        let vector_index = self.vector_index.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            pipeline::safe_revalidate_folder_fts(
+                &conn,
+                &path_buf,
+                include_subfolders,
+                cancel_flag,
+                progress_callback,
+                max_file_size_mb,
+                &excluded_dirs,
+                ocr_engine,
+                vector_index,
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Task join failed: {}", e)))?
+        .map_err(|e| AppError::IndexingFailed(e.to_string()))?;
+
+        Ok(result)
+    }
+
     /// 폴더 동기화 (변경분만 인덱싱: 추가/수정/삭제)
     pub async fn sync_folder(
         &self,
