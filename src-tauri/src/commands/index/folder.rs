@@ -521,6 +521,40 @@ pub async fn resume_indexing(
         }
     };
 
+    // 1단계(미완료 수선)가 정상 종료되면 2단계로 과거 완료본 중
+    // verified_at이 없는 지원 문서만 비파괴 재검증한다.
+    let mut result = result;
+    if !result.was_cancelled {
+        let verify_progress = create_fts_progress_callback(app_handle.clone());
+        match ctx
+            .service
+            .safe_revalidate_folder_fts(
+                &canonical_path,
+                ctx.include_subfolders,
+                Some(verify_progress),
+                ctx.max_file_size_mb,
+                ctx.exclude_dirs.clone(),
+            )
+            .await
+        {
+            Ok(verified) => {
+                result.indexed_count += verified.indexed_count;
+                result.failed_count += verified.failed_count;
+                result.ocr_image_count += verified.ocr_image_count;
+                result.cloud_skipped_count += verified.cloud_skipped_count;
+                result.errors.extend(verified.errors);
+                result.was_cancelled = verified.was_cancelled;
+            }
+            Err(e) => {
+                // 1단계 수선 결과는 이미 안전하게 저장됐다. 2단계 오류 때문에 이를 롤백하거나
+                // 기존 본문을 삭제하지 않고 사용자에게 오류만 반환한다.
+                emit_error_progress(&app_handle, &path_str, &e.to_string());
+                resume_watching(&state, &ctx.db_path);
+                return Err(ApiError::from(e));
+            }
+        }
+    }
+
     refresh_filename_cache(&state);
 
     let was_cancelled = result.was_cancelled;
@@ -549,12 +583,14 @@ pub async fn resume_indexing(
         resume_watching(&state, &ctx.db_path);
     }
 
-    let message = build_result_message(
-        &result,
-        was_cancelled,
-        ctx.semantic_available && ctx.semantic_enabled,
-        false,
-    );
+    let message = if was_cancelled {
+        "인덱스 수선이 취소되었습니다. 완료된 결과는 보존했습니다.".to_string()
+    } else {
+        format!(
+            "인덱스 수선 완료: {}건 갱신, {}건 재검증 실패(기존 본문 보존)",
+            result.indexed_count, result.failed_count
+        )
+    };
     log_indexing_errors(&result.errors);
 
     Ok(AddFolderResult {
