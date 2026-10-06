@@ -178,6 +178,7 @@ pub fn index_folder_fts_only(
         max_file_size_mb,
         false,
         false,
+        false,
         excluded_dirs,
         ocr_engine,
         vector_index,
@@ -206,6 +207,37 @@ pub fn resume_folder_fts(
         max_file_size_mb,
         true,
         false,
+        false,
+        excluded_dirs,
+        ocr_engine,
+        vector_index,
+    )
+}
+
+/// 비파괴 전체 재인덱싱: 모든 지원 문서를 다시 읽되 파싱/저장 실패 시 기존 본문을 보존한다.
+/// 성공한 문서만 SAVEPOINT 안에서 새 청크로 교체된다.
+#[allow(clippy::too_many_arguments)]
+pub fn safe_reindex_folder_fts(
+    conn: &Connection,
+    folder_path: &Path,
+    recursive: bool,
+    cancel_flag: Arc<AtomicBool>,
+    progress_callback: Option<FtsProgressCallback>,
+    max_file_size_mb: u64,
+    excluded_dirs: &[String],
+    ocr_engine: SharedOcrEngine,
+    vector_index: Option<Arc<crate::search::vector::VectorIndex>>,
+) -> Result<FolderIndexResult, IndexError> {
+    index_folder_fts_impl(
+        conn,
+        folder_path,
+        recursive,
+        cancel_flag,
+        progress_callback,
+        max_file_size_mb,
+        false,
+        false,
+        true,
         excluded_dirs,
         ocr_engine,
         vector_index,
@@ -235,6 +267,7 @@ pub fn safe_revalidate_folder_fts(
         max_file_size_mb,
         false,
         true,
+        true,
         excluded_dirs,
         ocr_engine,
         vector_index,
@@ -251,6 +284,7 @@ fn index_folder_fts_impl(
     max_file_size_mb: u64,
     skip_indexed: bool,
     only_unverified: bool,
+    preserve_existing_on_failure: bool,
     excluded_dirs: &[String],
     ocr_engine: SharedOcrEngine,
     vector_index: Option<Arc<crate::search::vector::VectorIndex>>,
@@ -631,7 +665,7 @@ fn index_folder_fts_impl(
                                     }
                                     // 안전 수선은 실패 시 기존 본문을 절대 지우지 않는다.
                                     // 일반 인덱싱만 기존 동작대로 메타데이터-only로 남긴다.
-                                    if !only_unverified {
+                                    if !preserve_existing_on_failure {
                                         if let Err(e) = save_file_metadata_only(
                                             conn,
                                             &path,
@@ -649,7 +683,7 @@ fn index_folder_fts_impl(
                         }
                         ParseResult::Failure { path, error } => {
                             // 안전 수선에서는 실패한 재검증이 기존 정상/부분 본문을 지우지 않는다.
-                            if !only_unverified {
+                            if !preserve_existing_on_failure {
                                 if let Err(e) =
                                     save_file_metadata_only(conn, &path, vector_index.as_deref())
                                 {
@@ -667,7 +701,7 @@ fn index_folder_fts_impl(
                         }
                         ParseResult::CloudSkipped { path } => {
                             // 안전 수선에서는 placeholder 때문에 기존 본문을 지우지 않는다.
-                            if only_unverified {
+                            if preserve_existing_on_failure {
                                 cloud_skipped += 1;
                                 send_progress("indexing", total, processed, None, false);
                                 continue;

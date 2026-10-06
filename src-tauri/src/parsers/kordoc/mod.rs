@@ -26,6 +26,8 @@ pub use render::render_svg;
 
 /// kordoc 프로세스 기본 타임아웃 (초)
 const KORDOC_TIMEOUT_SECS: u64 = 60;
+/// 앱 시작/버전 점검 타임아웃. 사내 DRM/백신 환경의 Node 첫 기동은 15초를 넘을 수 있다.
+const KORDOC_PROBE_TIMEOUT_SECS: u64 = 60;
 /// 수식 OCR 활성화 시 타임아웃 (초) — 모델 로드 + 페이지별 MFD/MFR 추론으로 시간이 늘어남.
 const KORDOC_FORMULA_TIMEOUT_SECS: u64 = 600;
 /// 레이아웃 SVG 응답 상한 — 문서 내 이미지가 base64 로 임베드되어 다페이지 사진
@@ -470,8 +472,13 @@ pub fn probe_runtime() -> Result<String, String> {
             "문서 변환기 실행 파일(node.exe)이 설치 폴더에 없습니다. 재설치가 필요합니다. {PROBE_HINT}"
         ));
     }
-    let out = run_kordoc_process(&cli, &["--version".into()], 15, "probe")
-        .map_err(|e| probe_spawn_error_message(&e.to_string()))?;
+    let out = run_kordoc_process(
+        &cli,
+        &["--version".into()],
+        KORDOC_PROBE_TIMEOUT_SECS,
+        "probe",
+    )
+    .map_err(|e| probe_spawn_error_message(&e.to_string()))?;
     if !out.status.success() {
         let snippet = stderr_snippet(&String::from_utf8_lossy(&out.stderr));
         return Err(format!(

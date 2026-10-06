@@ -339,7 +339,9 @@ impl IndexService {
         Ok(status)
     }
 
-    /// 폴더 재인덱싱 (기존 데이터 삭제 후 다시)
+    /// 폴더 전체 재인덱싱 — 기존 본문을 먼저 지우지 않는 비파괴 방식.
+    /// 각 파일은 새 파싱+저장이 성공한 경우에만 SAVEPOINT 안에서 교체되고,
+    /// 파싱 실패/클라우드 placeholder는 기존 검색 본문을 보존한다.
     pub async fn reindex_folder(
         &self,
         path: &Path,
@@ -348,19 +350,10 @@ impl IndexService {
         max_file_size_mb: u64,
         excluded_dirs: Vec<String>,
     ) -> AppResult<FolderIndexResult> {
-        // 경로 유효성 검증
         self.validate_path(path)?;
-        let path_str = path.to_string_lossy().to_string();
+        self.cancel_flag.store(false, Ordering::Relaxed);
 
-        // 벡터 워커 정지 후 진행 — 워커가 프리페치해 둔 청크(rowid 동결)가 아래 삭제·재삽입과
-        // 겹치면, 삭제로 반납된 rowid 를 새 파일이 재사용할 때(INTEGER PRIMARY KEY 는 꼬리
-        // rowid 재사용) 옛 파일의 임베딩이 새 청크 id 로 add 되어 시맨틱 검색이 영구
-        // 오염된다(무관한 문서가 히트). ※ 정지된 벡터 워커는 자동 재시작되지 않는다
-        // (should_auto_vector 는 항상 false — AI RAG 전용). 남은 pending_chunks 는 사용자가
-        // 시맨틱을 다시 켜거나 앱 재시작 시 이어서 처리된다. 감시 재개는 dworker-1 이
-        // 취소 경로에서도 보장한다 (dworker-2: 허위 'auto 재시작' 주석 정정).
-        // write 락+join 이 대형 인덱스 저장 동안 길어질 수 있어 spawn_blocking 으로 tokio
-        // 워커 스레드를 막지 않는다 (코드베이스 관례, dworker-4).
+        // 재인덱싱 중 옛 chunk id를 참조한 벡터 워커가 새 chunk에 오귀속시키지 않도록 정지.
         let worker = self.vector_worker.clone();
         let _ = tokio::task::spawn_blocking(move || {
             if let Ok(mut w) = worker.write() {
@@ -370,37 +363,30 @@ impl IndexService {
         })
         .await;
 
-        // 1. 벡터 인덱스에서 삭제
-        if let Some(vi) = self.vector_index.as_ref() {
-            let conn = self.get_connection()?;
-            let file_chunk_ids = db::get_file_and_chunk_ids_in_folder(&conn, &path_str)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+        let conn = self.get_connection()?;
+        let path_buf = path.to_path_buf();
+        let cancel_flag = self.cancel_flag.clone();
+        let ocr_engine = self.ocr_engine.clone();
+        let vector_index = self.vector_index.clone();
 
-            for (_file_id, chunk_ids) in file_chunk_ids {
-                for chunk_id in chunk_ids {
-                    let _ = vi.remove(chunk_id);
-                }
-            }
-            let _ = vi.save();
-        }
-
-        // 2. DB에서 삭제
-        {
-            let conn = self.get_connection()?;
-            let deleted = db::delete_files_in_folder(&conn, &path_str)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            tracing::info!("Deleted {} files for reindexing: {}", deleted, path_str);
-        }
-
-        // 3. FTS 재인덱싱 (재인덱싱은 메타 스캔 없이 직접 수행)
-        self.index_folder_fts(
-            path,
-            include_subfolders,
-            progress_callback,
-            max_file_size_mb,
-            excluded_dirs,
-        )
+        let result = tokio::task::spawn_blocking(move || {
+            pipeline::safe_reindex_folder_fts(
+                &conn,
+                &path_buf,
+                include_subfolders,
+                cancel_flag,
+                progress_callback,
+                max_file_size_mb,
+                &excluded_dirs,
+                ocr_engine,
+                vector_index,
+            )
+        })
         .await
+        .map_err(|e| AppError::Internal(format!("Task join failed: {}", e)))?
+        .map_err(|e| AppError::IndexingFailed(e.to_string()))?;
+
+        Ok(result)
     }
 
     /// 시맨틱 검색 사용 가능 여부
