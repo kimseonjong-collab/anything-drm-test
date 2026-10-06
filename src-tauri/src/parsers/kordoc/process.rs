@@ -1,7 +1,8 @@
 //! kordoc CLI 프로세스 실행: node 탐색, 파일 크기 검증, 공용 러너, 파싱 호출.
 
 use super::{
-    KordocOcrMode, KordocOptions, KORDOC_FORMULA_TIMEOUT_SECS, KORDOC_TIMEOUT_SECS, NODE_BIN,
+    KordocOcrMode, KordocOptions, KORDOC_FORMULA_TIMEOUT_SECS, KORDOC_PROBE_TIMEOUT_SECS,
+    KORDOC_TIMEOUT_SECS, NODE_BIN,
 };
 use crate::parsers::ParseError;
 use std::path::{Path, PathBuf};
@@ -242,7 +243,12 @@ fn kordoc_version(cli_path: &Path) -> Option<(u32, u32, u32)> {
         return None;
     }
     // 잠근 채로 잰다 — 색인 스레드들이 한꺼번에 --version 을 띄우지 않게
-    let version = run_kordoc_process(cli_path, &["--version".into()], 15, "version")
+    let version = run_kordoc_process(
+        cli_path,
+        &["--version".into()],
+        KORDOC_PROBE_TIMEOUT_SECS,
+        "version",
+    )
         .ok()
         .filter(|out| out.status.success())
         .and_then(|out| parse_version(&String::from_utf8_lossy(&out.stdout)));
