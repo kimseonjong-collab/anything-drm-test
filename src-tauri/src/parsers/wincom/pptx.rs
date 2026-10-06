@@ -150,15 +150,20 @@ struct PowerPointRequest {
     reply: mpsc::Sender<Result<Vec<SlideText>, ParseError>>,
 }
 
-static POWERPOINT_WORKER: OnceLock<Mutex<Option<mpsc::Sender<PowerPointRequest>>>> =
-    OnceLock::new();
+struct WorkerHandle {
+    sender: mpsc::Sender<PowerPointRequest>,
+    stopped: mpsc::Receiver<()>,
+}
 
-fn powerpoint_worker_slot() -> &'static Mutex<Option<mpsc::Sender<PowerPointRequest>>> {
+static POWERPOINT_WORKER: OnceLock<Mutex<Option<WorkerHandle>>> = OnceLock::new();
+
+fn powerpoint_worker_slot() -> &'static Mutex<Option<WorkerHandle>> {
     POWERPOINT_WORKER.get_or_init(|| Mutex::new(None))
 }
 
-fn start_powerpoint_worker() -> mpsc::Sender<PowerPointRequest> {
+fn start_powerpoint_worker() -> WorkerHandle {
     let (tx, rx) = mpsc::channel::<PowerPointRequest>();
+    let (stopped_tx, stopped_rx) = mpsc::channel::<()>();
     std::thread::Builder::new()
         .name("anything-powerpoint-com".into())
         .spawn(move || {
@@ -170,6 +175,7 @@ fn start_powerpoint_worker() -> mpsc::Sender<PowerPointRequest> {
                     while let Ok(req) = rx.recv() {
                         let _ = req.reply.send(Err(ParseError::ParseError(err.to_string())));
                     }
+                    let _ = stopped_tx.send(());
                     return;
                 }
             };
@@ -182,21 +188,32 @@ fn start_powerpoint_worker() -> mpsc::Sender<PowerPointRequest> {
             }
             quit_if_idle(&app, "Presentations");
             tracing::info!("PowerPoint COM persistent session stopped");
+            let _ = stopped_tx.send(());
         })
         .expect("failed to start PowerPoint COM worker");
-    tx
+    WorkerHandle {
+        sender: tx,
+        stopped: stopped_rx,
+    }
 }
 
 /// Disconnect the persistent COM worker so its receive loop can finish,
 /// call Application.Quit() via quit_if_idle(), and release the STA apartment.
 pub(crate) fn shutdown_worker() {
-    let sender = {
+    let handle = {
         let mut slot = powerpoint_worker_slot()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         slot.take()
     };
-    drop(sender);
+    if let Some(handle) = handle {
+        let WorkerHandle { sender, stopped } = handle;
+        drop(sender);
+        match stopped.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => tracing::info!("PowerPoint COM worker shutdown acknowledged"),
+            Err(_) => tracing::warn!("PowerPoint COM worker shutdown acknowledgement timed out"),
+        }
+    }
 }
 
 fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
@@ -212,7 +229,7 @@ fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
         if slot.is_none() {
             *slot = Some(start_powerpoint_worker());
         }
-        slot.as_ref().unwrap().clone()
+        slot.as_ref().unwrap().sender.clone()
     };
 
     if sender.send(req).is_err() {

@@ -184,14 +184,20 @@ struct ExcelRequest {
     reply: mpsc::Sender<Result<Vec<SheetData>, ParseError>>,
 }
 
-static EXCEL_WORKER: OnceLock<Mutex<Option<mpsc::Sender<ExcelRequest>>>> = OnceLock::new();
+struct WorkerHandle {
+    sender: mpsc::Sender<ExcelRequest>,
+    stopped: mpsc::Receiver<()>,
+}
 
-fn excel_worker_slot() -> &'static Mutex<Option<mpsc::Sender<ExcelRequest>>> {
+static EXCEL_WORKER: OnceLock<Mutex<Option<WorkerHandle>>> = OnceLock::new();
+
+fn excel_worker_slot() -> &'static Mutex<Option<WorkerHandle>> {
     EXCEL_WORKER.get_or_init(|| Mutex::new(None))
 }
 
-fn start_excel_worker() -> mpsc::Sender<ExcelRequest> {
+fn start_excel_worker() -> WorkerHandle {
     let (tx, rx) = mpsc::channel::<ExcelRequest>();
+    let (stopped_tx, stopped_rx) = mpsc::channel::<()>();
     std::thread::Builder::new()
         .name("anything-excel-com".into())
         .spawn(move || {
@@ -203,6 +209,7 @@ fn start_excel_worker() -> mpsc::Sender<ExcelRequest> {
                     while let Ok(req) = rx.recv() {
                         let _ = req.reply.send(Err(ParseError::ParseError(err.to_string())));
                     }
+                    let _ = stopped_tx.send(());
                     return;
                 }
             };
@@ -215,21 +222,32 @@ fn start_excel_worker() -> mpsc::Sender<ExcelRequest> {
             }
             quit_if_idle(&app, "Workbooks");
             tracing::info!("Excel COM persistent session stopped");
+            let _ = stopped_tx.send(());
         })
         .expect("failed to start Excel COM worker");
-    tx
+    WorkerHandle {
+        sender: tx,
+        stopped: stopped_rx,
+    }
 }
 
 /// Disconnect the persistent COM worker so its receive loop can finish,
 /// call Application.Quit() via quit_if_idle(), and release the STA apartment.
 pub(crate) fn shutdown_worker() {
-    let sender = {
+    let handle = {
         let mut slot = excel_worker_slot()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         slot.take()
     };
-    drop(sender);
+    if let Some(handle) = handle {
+        let WorkerHandle { sender, stopped } = handle;
+        drop(sender);
+        match stopped.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => tracing::info!("Excel COM worker shutdown acknowledged"),
+            Err(_) => tracing::warn!("Excel COM worker shutdown acknowledgement timed out"),
+        }
+    }
 }
 
 fn request_sheets(path: &Path) -> Result<Vec<SheetData>, ParseError> {
@@ -245,7 +263,7 @@ fn request_sheets(path: &Path) -> Result<Vec<SheetData>, ParseError> {
         if slot.is_none() {
             *slot = Some(start_excel_worker());
         }
-        slot.as_ref().unwrap().clone()
+        slot.as_ref().unwrap().sender.clone()
     };
 
     if sender.send(req).is_err() {
