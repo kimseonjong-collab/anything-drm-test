@@ -26,30 +26,13 @@ jobs:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
-      - name: Prepare build resources
+      - name: Create minimal resource placeholders
         shell: pwsh
         run: |
-          npm ci --prefix kordoc-src 2>$null
-        continue-on-error: true
-      - name: Checkout kordoc
-        uses: actions/checkout@v4
-        with:
-          repository: chrisryugj/kordoc
-          path: kordoc-src
-          ref: 265b055bc977ccf35e150919ad49189b57e55ee8
-      - name: Build and bundle kordoc
-        shell: pwsh
-        run: |
-          Push-Location kordoc-src
-          npm ci
-          npm run build
-          Pop-Location
-          & scripts/bundle-kordoc.ps1 -KordocDir "${{ github.workspace }}/kordoc-src"
-      - name: Download models
-        shell: pwsh
-        run: |
-          & scripts/download-model.ps1
-          & scripts/download-vcredist.ps1
+          $r = "src-tauri/resources"
+          New-Item -ItemType Directory -Force -Path "$r/kordoc","$r/paddleocr","$r/onnxruntime","$r/pdfium" | Out-Null
+          New-Item -ItemType File -Force -Path "$r/node.exe","$r/kordoc/.gitkeep","$r/paddleocr/det.onnx","$r/paddleocr/rec.onnx","$r/paddleocr/dict.txt","$r/onnxruntime/onnxruntime.dll","$r/pdfium/pdfium.dll" | Out-Null
+
       - name: Build executable without installer bundle
         shell: pwsh
         run: pnpm exec tauri build --no-bundle
@@ -59,7 +42,7 @@ jobs:
           $out = "smoke/Anything-smoke"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           Copy-Item "src-tauri/target/release/docufinder.exe" "$out/Anything-smoke.exe"
-          Copy-Item "src-tauri/resources" "$out/resources" -Recurse
+          # Office COM shutdown test does not need kordoc/OCR/ONNX/PDFium resources.
           @"
           SMOKE TEST ONLY
           This is not an installer.
@@ -69,7 +52,7 @@ jobs:
       - name: Upload portable smoke artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Anything-v3.8.21-office-shutdown-smoke
+          name: Anything-v3.8.21-office-com-minimal
           path: smoke/Anything-smoke/
           retention-days: 3
           compression-level: 9
