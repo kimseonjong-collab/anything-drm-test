@@ -249,9 +249,9 @@ fn kordoc_version(cli_path: &Path) -> Option<(u32, u32, u32)> {
         KORDOC_PROBE_TIMEOUT_SECS,
         "version",
     )
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| parse_version(&String::from_utf8_lossy(&out.stdout)));
+    .ok()
+    .filter(|out| out.status.success())
+    .and_then(|out| parse_version(&String::from_utf8_lossy(&out.stdout)));
     match version {
         Some(v) => cache.value = Some(v),
         None => cache.failed_at = Some(Instant::now()),
