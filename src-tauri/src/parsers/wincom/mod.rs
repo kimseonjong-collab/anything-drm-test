@@ -14,6 +14,7 @@
 //! - 매크로 보안: `AutomationSecurity = ForceDisable` 로 Open 시 매크로 자동실행 차단.
 
 pub mod docx;
+pub mod hwp;
 pub mod pptx;
 pub mod xlsx;
 
@@ -38,6 +39,8 @@ use crate::parsers::ParseError;
 /// quit_if_idle(), and releases its COM apartment.
 pub(crate) fn shutdown_workers() {
     docx::shutdown_worker();
+    // HWP fallback is intentionally short-lived (one COM object per DRM file),
+    // so there is no persistent HWP worker to shut down here.
     pptx::shutdown_worker();
     xlsx::shutdown_worker();
     tracing::info!("Office COM worker shutdown requested");
