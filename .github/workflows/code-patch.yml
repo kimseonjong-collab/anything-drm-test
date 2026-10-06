@@ -95,9 +95,10 @@ jobs:
           $target = $null
           foreach ($app in $candidates) {
             if ($app.InstallLocation) {
-              $p = Join-Path $app.InstallLocation 'docufinder.exe'
+              $installRoot = ([string]$app.InstallLocation).Trim().Trim('"')
+              $p = Join-Path $installRoot 'docufinder.exe'
               if (Test-Path $p) { $target = $p; break }
-              $p = Join-Path $app.InstallLocation 'Anything.exe'
+              $p = Join-Path $installRoot 'Anything.exe'
               if (Test-Path $p) { $target = $p; break }
             }
             if ($app.DisplayIcon) {
@@ -134,7 +135,15 @@ jobs:
           @'
           @echo off
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Apply-Anything-Code-Patch.ps1"
-          if errorlevel 1 pause
+          set EXITCODE=%ERRORLEVEL%
+          echo.
+          if not "%EXITCODE%"=="0" (
+            echo Patch failed with exit code %EXITCODE%.
+          ) else (
+            echo Patch completed successfully.
+          )
+          pause
+          exit /b %EXITCODE%
           '@ | Set-Content "$pkg/Apply-Anything-Code-Patch.cmd" -Encoding ASCII
 
       - name: Upload code-only patch
