@@ -1,0 +1,146 @@
+name: Windows Code Patch
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'src-tauri/src/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'src-tauri/Cargo.toml'
+      - 'src-tauri/Cargo.lock'
+      - '.github/workflows/code-patch.yml'
+
+concurrency:
+  group: code-patch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    name: Build code-only Windows patch
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      # The installed v3.8.21+ app already owns the large runtime resources.
+      # Empty placeholders satisfy Tauri's build-time resource checks only;
+      # the patch artifact intentionally ships no kordoc/OCR/ONNX/PDFium/WebView2 payload.
+      - name: Create build-only resource placeholders
+        shell: pwsh
+        run: |
+          $r = 'src-tauri/resources'
+          New-Item -ItemType Directory -Force -Path "$r/kordoc","$r/paddleocr","$r/onnxruntime","$r/pdfium" | Out-Null
+          New-Item -ItemType File -Force -Path "$r/node.exe","$r/kordoc/.gitkeep","$r/paddleocr/det.onnx","$r/paddleocr/rec.onnx","$r/paddleocr/dict.txt","$r/onnxruntime/onnxruntime.dll","$r/pdfium/pdfium.dll" | Out-Null
+
+      - name: Build executable only
+        shell: pwsh
+        run: pnpm exec tauri build --no-bundle
+
+      - name: Assemble patch package
+        shell: pwsh
+        run: |
+          $pkg = 'patch/Anything-Code-Patch'
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          Copy-Item 'src-tauri/target/release/docufinder.exe' "$pkg/Anything.new.exe"
+
+          $version = node -p "require('./package.json').version"
+          $sha = (Get-FileHash "$pkg/Anything.new.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = [ordered]@{
+            product = 'Anything'
+            version = $version
+            sha256 = $sha
+            channel = 'code-only'
+            requiresInstalledVersion = '3.8.21'
+            builtFrom = '${{ github.sha }}'
+          } | ConvertTo-Json
+          $manifest | Set-Content "$pkg/manifest.json" -Encoding UTF8
+
+          @'
+          param([switch]$NoLaunch)
+          $ErrorActionPreference = 'Stop'
+          $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+          $NewExe = Join-Path $Here 'Anything.new.exe'
+          $ManifestPath = Join-Path $Here 'manifest.json'
+          if (!(Test-Path $NewExe) -or !(Test-Path $ManifestPath)) { throw 'Patch package is incomplete.' }
+          $m = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+          $actual = (Get-FileHash $NewExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $m.sha256) { throw "SHA-256 mismatch. expected=$($m.sha256) actual=$actual" }
+
+          $running = Get-Process docufinder -ErrorAction SilentlyContinue
+          if ($running) {
+            $running | Stop-Process
+            $deadline = (Get-Date).AddSeconds(15)
+            while ((Get-Process docufinder -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+            if (Get-Process docufinder -ErrorAction SilentlyContinue) { throw 'Anything did not exit cleanly. Close it and retry.' }
+          }
+
+          $candidates = @()
+          foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
+            $candidates += Get-ItemProperty $root -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Anything' }
+          }
+          $target = $null
+          foreach ($app in $candidates) {
+            if ($app.InstallLocation) {
+              $p = Join-Path $app.InstallLocation 'docufinder.exe'
+              if (Test-Path $p) { $target = $p; break }
+              $p = Join-Path $app.InstallLocation 'Anything.exe'
+              if (Test-Path $p) { $target = $p; break }
+            }
+            if ($app.DisplayIcon) {
+              $p = ($app.DisplayIcon -replace ',\d+$','').Trim('"')
+              if (Test-Path $p) { $target = $p; break }
+            }
+          }
+          if (-not $target) {
+            $fallbacks = @(
+              "$env:LOCALAPPDATA\Programs\Anything\docufinder.exe",
+              "$env:LOCALAPPDATA\Programs\Anything\Anything.exe",
+              "$env:LOCALAPPDATA\Anything\docufinder.exe",
+              "$env:LOCALAPPDATA\Anything\Anything.exe"
+            )
+            $target = $fallbacks | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $target) { throw 'Installed Anything executable was not found. Do not copy the patch manually.' }
+
+          $backup = "$target.pre-code-patch.bak"
+          Copy-Item $target $backup -Force
+          try {
+            Copy-Item $NewExe $target -Force
+            $installed = (Get-FileHash $target -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installed -ne $m.sha256) { throw 'Installed executable hash verification failed.' }
+          } catch {
+            Copy-Item $backup $target -Force
+            throw
+          }
+          Remove-Item $backup -Force -ErrorAction SilentlyContinue
+          Write-Host "Anything code patch $($m.version) installed successfully: $target"
+          if (-not $NoLaunch) { Start-Process $target }
+          '@ | Set-Content "$pkg/Apply-Anything-Code-Patch.ps1" -Encoding UTF8
+
+          @'
+          @echo off
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Apply-Anything-Code-Patch.ps1"
+          if errorlevel 1 pause
+          '@ | Set-Content "$pkg/Apply-Anything-Code-Patch.cmd" -Encoding ASCII
+
+      - name: Upload code-only patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anything-code-patch-${{ github.sha }}
+          path: patch/Anything-Code-Patch/
+          retention-days: 14
+          compression-level: 9
