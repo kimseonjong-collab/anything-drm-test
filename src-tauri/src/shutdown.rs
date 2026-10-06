@@ -31,6 +31,13 @@ pub(crate) fn cleanup_vector_resources(container: &AppContainer) {
 /// 앱 종료 절차 (트레이 quit + 창 닫기 공통):
 /// 즉시 취소 신호 → cleanup 교착 대비 3초 watchdog → 벡터 리소스 정리 → 프로세스 종료
 pub(crate) fn graceful_shutdown(app: &tauri::AppHandle) {
+    // Persistent Office COM workers own out-of-process Word/Excel/PowerPoint
+    // Application objects. Drop their global senders first so each STA worker
+    // can leave recv(), call Application.Quit(), and release COM before this
+    // process exits. Without this, Office /Automation -Embedding processes
+    // survive Anything shutdown.
+    #[cfg(windows)]
+    crate::parsers::wincom::shutdown_workers();
     // 즉시 취소 신호 (인덱싱 스레드가 최대한 빨리 탈출하도록)
     if let Some(container) = app.try_state::<RwLock<AppContainer>>() {
         if let Ok(container) = container.read() {
