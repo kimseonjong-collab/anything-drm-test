@@ -150,8 +150,12 @@ struct PowerPointRequest {
     reply: mpsc::Sender<Result<Vec<SlideText>, ParseError>>,
 }
 
-static POWERPOINT_WORKER: OnceLock<Mutex<Option<mpsc::Sender<PowerPointRequest>>>> =
-    OnceLock::new();
+struct WorkerHandle {
+    sender: mpsc::Sender<PowerPointRequest>,
+    stopped: mpsc::Receiver<()>,
+}
+
+static POWERPOINT_WORKER: OnceLock<Mutex<Option<WorkerHandle>>> = OnceLock::new();
 
 fn powerpoint_worker_slot() -> &'static Mutex<Option<WorkerHandle>> {
     POWERPOINT_WORKER.get_or_init(|| Mutex::new(None))
