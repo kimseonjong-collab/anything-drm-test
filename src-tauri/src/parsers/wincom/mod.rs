@@ -33,6 +33,16 @@ use windows::Win32::System::Variant::{
 
 use crate::parsers::ParseError;
 
+/// Disconnect all persistent Office COM workers during application shutdown.
+/// Once the last Sender is dropped, each STA worker leaves recv(), calls
+/// quit_if_idle(), and releases its COM apartment.
+pub(crate) fn shutdown_workers() {
+    docx::shutdown_worker();
+    pptx::shutdown_worker();
+    xlsx::shutdown_worker();
+    tracing::info!("Office COM worker shutdown requested");
+}
+
 // ============================================================================
 // Office 자동화 상수
 // ============================================================================
