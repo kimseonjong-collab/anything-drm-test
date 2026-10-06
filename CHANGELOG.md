@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.8.20] - 2026-10-06
+
+### Fixed
+- Makes `전체 다시 인덱싱` non-destructive: existing searchable body text is preserved when reparsing fails or encounters a cloud placeholder; successful documents replace their old chunks through the existing per-document SAVEPOINT path.
+- Stops deleting an entire folder index before full reindex, preventing parser/DRM failures from wiping previously searchable content.
+- Increases kordoc runtime probe and version-detection startup timeout from 15 seconds to 60 seconds for slower corporate DRM/security environments.
+- Keeps ordinary file-change/watch semantics unchanged so genuinely changed unreadable files do not retain stale body text.
+- Includes the v3.8.19 Office COM shutdown fix that closes persistent Word, Excel, and PowerPoint automation sessions when Anything exits.
+
 ## [3.8.19] - 2026-10-06
 
 ### Fixed
