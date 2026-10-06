@@ -148,6 +148,16 @@ fn start_word_worker() -> mpsc::Sender<WordRequest> {
     tx
 }
 
+/// Disconnect the persistent COM worker so its receive loop can finish,
+/// call Application.Quit() via quit_if_idle(), and release the STA apartment.
+pub(crate) fn shutdown_worker() {
+    let sender = {
+        let mut slot = word_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        slot.take()
+    };
+    drop(sender);
+}
+
 fn request_text(path: &Path) -> Result<String, ParseError> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let req = WordRequest {
