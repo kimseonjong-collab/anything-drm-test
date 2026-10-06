@@ -15,7 +15,7 @@ pub mod xlsx;
 
 use crate::ocr::OcrEngine;
 #[cfg(windows)]
-use crate::parsers::wincom::{docx as wincom_docx, pptx as wincom_pptx, xlsx as wincom_xlsx};
+use crate::parsers::wincom::{docx as wincom_docx, hwp as wincom_hwp, pptx as wincom_pptx, xlsx as wincom_xlsx};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
@@ -316,12 +316,28 @@ fn parse_file_inner(
         // HWP5 바이너리: kordoc 전용 (Rust 파서 없음). kordoc 실제 에러를 그대로 반환해
         // 사용자가 "kordoc 필요"라는 잘못된 안내 대신 진짜 원인 (구버전 HWP3, 비표준 변종 등)을
         // 볼 수 있도록 한다 — 이슈 #22 진단 가시성 개선.
-        "hwp" | "hml" => Err(kordoc_err.unwrap_or_else(|| {
-            if kordoc::is_available() {
-                // kordoc 가 사용 가능한데도 에러가 None 이면 위 분기를 안 탔다는 뜻 — 이론상 도달 X.
-                ParseError::ParseError(format!("{extension} 파싱 경로 비정상 진입"))
+        "hwp" => {
+            let err = kordoc_err.unwrap_or_else(|| {
+                if kordoc::is_available() {
+                    ParseError::ParseError("hwp 파싱 경로 비정상 진입".into())
+                } else {
+                    ParseError::UnsupportedFileType("hwp (kordoc 필요)".into())
+                }
+            });
+            // Kordoc deliberately rejects Hancom/enterprise DRM. On Windows only, fall back
+            // to Hancom's installed Automation object. Hancom's own access-consent prompt is
+            // intentionally preserved; this path never decrypts/copies/bypasses the document.
+            if is_hwp_drm_error(&err) {
+                wincom_fallback_hwp(path, err)
             } else {
-                ParseError::UnsupportedFileType(format!("{extension} (kordoc 필요)"))
+                Err(err)
+            }
+        }
+        "hml" => Err(kordoc_err.unwrap_or_else(|| {
+            if kordoc::is_available() {
+                ParseError::ParseError("hml 파싱 경로 비정상 진입".into())
+            } else {
+                ParseError::UnsupportedFileType("hml (kordoc 필요)".into())
             }
         })),
         "hwpx" => parse_with_timeout(path, 30, "HWPX", hwpx::parse),
@@ -378,6 +394,28 @@ fn parse_file_inner(
         }
         _ => Err(ParseError::UnsupportedFileType(extension)),
     }
+}
+
+fn is_hwp_drm_error(err: &ParseError) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("drm_protected")
+        || msg.contains("drm 보호")
+        || (msg.contains("drm") && msg.contains("hwp"))
+}
+
+#[cfg(windows)]
+fn wincom_fallback_hwp(path: &Path, original_err: ParseError) -> Result<ParsedDocument, ParseError> {
+    match parse_with_timeout(path, 180, "HWP DRM COM", wincom_hwp::parse) {
+        Ok(doc) => Ok(doc),
+        Err(com_err) => Err(ParseError::ParseError(format!(
+            "{original_err}; Hancom COM fallback 실패: {com_err}"
+        ))),
+    }
+}
+
+#[cfg(not(windows))]
+fn wincom_fallback_hwp(_path: &Path, original_err: ParseError) -> Result<ParsedDocument, ParseError> {
+    Err(original_err)
 }
 
 // --- wincom fallback wrappers (Windows-only; no-op on other platforms) --------
