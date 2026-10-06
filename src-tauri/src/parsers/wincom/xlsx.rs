@@ -224,7 +224,9 @@ fn start_excel_worker() -> mpsc::Sender<ExcelRequest> {
 /// call Application.Quit() via quit_if_idle(), and release the STA apartment.
 pub(crate) fn shutdown_worker() {
     let sender = {
-        let mut slot = excel_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = excel_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         slot.take()
     };
     drop(sender);
