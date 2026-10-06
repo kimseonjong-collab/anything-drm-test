@@ -404,7 +404,10 @@ fn is_hwp_drm_error(err: &ParseError) -> bool {
 }
 
 #[cfg(windows)]
-fn wincom_fallback_hwp(path: &Path, original_err: ParseError) -> Result<ParsedDocument, ParseError> {
+fn wincom_fallback_hwp(
+    path: &Path,
+    original_err: ParseError,
+) -> Result<ParsedDocument, ParseError> {
     match parse_with_timeout(path, 180, "HWP DRM COM", wincom_hwp::parse) {
         Ok(doc) => Ok(doc),
         Err(com_err) => Err(ParseError::ParseError(format!(
@@ -414,7 +417,10 @@ fn wincom_fallback_hwp(path: &Path, original_err: ParseError) -> Result<ParsedDo
 }
 
 #[cfg(not(windows))]
-fn wincom_fallback_hwp(_path: &Path, original_err: ParseError) -> Result<ParsedDocument, ParseError> {
+fn wincom_fallback_hwp(
+    _path: &Path,
+    original_err: ParseError,
+) -> Result<ParsedDocument, ParseError> {
     Err(original_err)
 }
 
