@@ -472,8 +472,13 @@ pub fn probe_runtime() -> Result<String, String> {
             "문서 변환기 실행 파일(node.exe)이 설치 폴더에 없습니다. 재설치가 필요합니다. {PROBE_HINT}"
         ));
     }
-    let out = run_kordoc_process(&cli, &["--version".into()], KORDOC_PROBE_TIMEOUT_SECS, "probe")
-        .map_err(|e| probe_spawn_error_message(&e.to_string()))?;
+    let out = run_kordoc_process(
+        &cli,
+        &["--version".into()],
+        KORDOC_PROBE_TIMEOUT_SECS,
+        "probe",
+    )
+    .map_err(|e| probe_spawn_error_message(&e.to_string()))?;
     if !out.status.success() {
         let snippet = stderr_snippet(&String::from_utf8_lossy(&out.stderr));
         return Err(format!(
