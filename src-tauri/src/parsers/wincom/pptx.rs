@@ -191,7 +191,9 @@ fn start_powerpoint_worker() -> mpsc::Sender<PowerPointRequest> {
 /// call Application.Quit() via quit_if_idle(), and release the STA apartment.
 pub(crate) fn shutdown_worker() {
     let sender = {
-        let mut slot = powerpoint_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = powerpoint_worker_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         slot.take()
     };
     drop(sender);
