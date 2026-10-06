@@ -187,6 +187,16 @@ fn start_powerpoint_worker() -> mpsc::Sender<PowerPointRequest> {
     tx
 }
 
+/// Disconnect the persistent COM worker so its receive loop can finish,
+/// call Application.Quit() via quit_if_idle(), and release the STA apartment.
+pub(crate) fn shutdown_worker() {
+    let sender = {
+        let mut slot = powerpoint_worker_slot().lock().unwrap_or_else(|e| e.into_inner());
+        slot.take()
+    };
+    drop(sender);
+}
+
 fn request_slides(path: &Path) -> Result<Vec<SlideText>, ParseError> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let req = PowerPointRequest {
