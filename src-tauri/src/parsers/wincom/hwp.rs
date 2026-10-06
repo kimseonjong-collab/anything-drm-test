@@ -55,7 +55,9 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
             let text_var = hwp
                 .call("GetPageText", &[var_i32(page as i32), var_i32(0)])
                 .map_err(|e| to_parse_error("Hancom HWP GetPageText", &e))?;
-            let text = v_string(&text_var).replace("\r\n", "\n").replace('\r', "\n");
+            let text = v_string(&text_var)
+                .replace("\r\n", "\n")
+                .replace('\r', "\n");
             if !text.trim().is_empty() {
                 pages.push(text);
             }
@@ -76,7 +78,11 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
                 title: path.file_stem().and_then(|s| s.to_str()).map(String::from),
                 author: None,
                 created_at: None,
-                page_count: if page_count > 0 { Some(page_count) } else { None },
+                page_count: if page_count > 0 {
+                    Some(page_count)
+                } else {
+                    None
+                },
             },
             chunks,
             garbled_hint: false,
