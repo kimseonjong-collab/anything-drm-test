@@ -1,4 +1,11 @@
 # Changelog
+
+## [3.8.19] - 2026-10-06
+
+### Fixed
+- Explicitly disconnects persistent Word, Excel, and PowerPoint COM workers during Anything shutdown.
+- Allows existing worker cleanup to call Office Application.Quit(), preventing /Automation -Embedding processes from remaining after Anything exits.
+
 ## [3.8.18] - 2026-10-05
 
 ### Fixed
