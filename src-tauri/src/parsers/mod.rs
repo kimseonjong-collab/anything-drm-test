@@ -403,6 +403,7 @@ fn is_hwp_drm_error(err: &ParseError) -> bool {
     msg.contains("drm_protected")
         || msg.contains("drm 보호")
         || (msg.contains("drm") && msg.contains("hwp"))
+        || msg.contains("kordoc: 추출된 텍스트 없음")
 }
 
 #[cfg(windows)]

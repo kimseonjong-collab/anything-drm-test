@@ -37,7 +37,7 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
                 &[
                     var_str(&path_str),
                     var_str(""),
-                    var_str("suspendpassword:TRUE;versionwarning:FALSE"),
+                    var_str("suspendpassword:TRUE;forceopen:TRUE;versionwarning:FALSE"),
                 ],
             )
             .map_err(|e| to_parse_error("Hancom HWP Open", &e))?;
