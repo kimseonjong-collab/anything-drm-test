@@ -15,7 +15,9 @@ pub mod xlsx;
 
 use crate::ocr::OcrEngine;
 #[cfg(windows)]
-use crate::parsers::wincom::{docx as wincom_docx, hwp as wincom_hwp, pptx as wincom_pptx, xlsx as wincom_xlsx};
+use crate::parsers::wincom::{
+    docx as wincom_docx, hwp as wincom_hwp, pptx as wincom_pptx, xlsx as wincom_xlsx,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
