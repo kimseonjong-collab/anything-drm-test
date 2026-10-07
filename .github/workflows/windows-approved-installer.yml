@@ -16,6 +16,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: pnpm/action-setup@v4
 
@@ -68,6 +70,8 @@ jobs:
 
       - name: Prepare approval package
         shell: pwsh
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           $src = 'src-tauri/target/release/bundle/nsis'
           $setup = Get-ChildItem $src -Filter '*setup.exe' | Where-Object { $_.Name -notmatch 'Lite' } | Select-Object -First 1
@@ -82,14 +86,15 @@ jobs:
 
           $hash = Get-FileHash $setup.FullName -Algorithm SHA256
           @(
-            "PR=24",
-            "HEAD=${{ github.sha }}",
+            'PR=24',
+            "HEAD=$env:SOURCE_SHA",
             "FILE=$($setup.Name)",
             "SHA256=$($hash.Hash)",
             'PURPOSE=Organization-approved WDAC/Managed Installer deployment test for HWP DRM COM fallback',
             'SECURITY=No DRM bypass; preserves Hancom/Fasoo user access-consent prompt'
           ) | Set-Content (Join-Path $out 'APPROVAL-METADATA.txt') -Encoding UTF8
 
+          Write-Host "Source HEAD: $env:SOURCE_SHA"
           Write-Host "Installer: $($setup.Name)"
           Write-Host "SHA256: $($hash.Hash)"
 
