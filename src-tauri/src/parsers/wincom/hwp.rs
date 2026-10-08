@@ -340,7 +340,11 @@ fn extract(hwp: &Obj, path: &Path) -> Result<ParsedDocument, ParseError> {
     Ok(document_from_text(
         path,
         content,
-        if page_count > 0 { Some(page_count) } else { None },
+        if page_count > 0 {
+            Some(page_count)
+        } else {
+            None
+        },
     ))
 }
 
