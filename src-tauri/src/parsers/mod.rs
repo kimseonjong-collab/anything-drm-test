@@ -864,7 +864,8 @@ mod tests {
         assert_eq!(hwp_header_kind(hwp_file(b"PK\x03\x04").path()), HwpHeader::Zip);
         assert_eq!(hwp_header_kind(hwp_file(b"HWP Document File V3.00").path()), HwpHeader::Hwp3);
         assert_eq!(hwp_header_kind(hwp_file(WRAPPED).path()), HwpHeader::Other);
-        assert_eq!(hwp_header_kind(Path::new("Z:\no\such\file.hwp")), HwpHeader::Unreadable);
+        let missing = Path::new("no-such-dir/missing.hwp");
+        assert_eq!(hwp_header_kind(missing), HwpHeader::Unreadable);
     }
 
     /// A: a plain HWP5 failing in kordoc is NOT sent to Hancom COM; the error is unchanged.
