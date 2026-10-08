@@ -450,7 +450,10 @@ pub(crate) fn hwp_com_fallback_eligible(
     err: &ParseError,
     header: HwpHeader,
 ) -> Option<&'static str> {
-    if matches!(err, ParseError::PasswordProtected(_) | ParseError::CloudPlaceholder(_)) {
+    if matches!(
+        err,
+        ParseError::PasswordProtected(_) | ParseError::CloudPlaceholder(_)
+    ) {
         return None;
     }
     if is_hwp_drm_error(err) {
@@ -495,7 +498,11 @@ where
 {
     tracing::warn!("HWP kordoc failed: {} — {}", kordoc_err, path.display());
     let Some(reason) = hwp_com_fallback_eligible(&kordoc_err, header) else {
-        tracing::info!("HWP COM fallback not eligible (header {:?}) — {}", header, path.display());
+        tracing::info!(
+            "HWP COM fallback not eligible (header {:?}) — {}",
+            header,
+            path.display()
+        );
         return Err(kordoc_err);
     };
     tracing::info!("HWP COM fallback eligible: {} — {}", reason, path.display());
@@ -509,7 +516,11 @@ where
             Ok(doc)
         }
         Err(com_err) => {
-            tracing::warn!("HWP COM extraction failed: {} — {}", com_err, path.display());
+            tracing::warn!(
+                "HWP COM extraction failed: {} — {}",
+                com_err,
+                path.display()
+            );
             tracing::warn!("HWP fallback exhausted — {}", path.display());
             Err(ParseError::ParseError(format!(
                 "{kordoc_err}; Hancom COM fallback 실패: {com_err}"
@@ -861,8 +872,14 @@ mod tests {
     #[test]
     fn hwp_header_kinds_from_magic_bytes() {
         assert_eq!(hwp_header_kind(hwp_file(CFB).path()), HwpHeader::Cfb);
-        assert_eq!(hwp_header_kind(hwp_file(b"PK\x03\x04").path()), HwpHeader::Zip);
-        assert_eq!(hwp_header_kind(hwp_file(b"HWP Document File V3.00").path()), HwpHeader::Hwp3);
+        assert_eq!(
+            hwp_header_kind(hwp_file(b"PK\x03\x04").path()),
+            HwpHeader::Zip
+        );
+        assert_eq!(
+            hwp_header_kind(hwp_file(b"HWP Document File V3.00").path()),
+            HwpHeader::Hwp3
+        );
         assert_eq!(hwp_header_kind(hwp_file(WRAPPED).path()), HwpHeader::Other);
         let missing = Path::new("no-such-dir/missing.hwp");
         assert_eq!(hwp_header_kind(missing), HwpHeader::Unreadable);
@@ -905,8 +922,16 @@ mod tests {
     fn eligibility_is_narrow() {
         let drm = ParseError::ParseError("DRM_PROTECTED: DRM 보호 문서".into());
         assert!(hwp_com_fallback_eligible(&drm, HwpHeader::Cfb).is_some()); // existing DRM signal
-        for h in [HwpHeader::Cfb, HwpHeader::Zip, HwpHeader::Hwp3, HwpHeader::Unreadable] {
-            assert!(hwp_com_fallback_eligible(&unsupported(), h).is_none(), "{h:?}");
+        for h in [
+            HwpHeader::Cfb,
+            HwpHeader::Zip,
+            HwpHeader::Hwp3,
+            HwpHeader::Unreadable,
+        ] {
+            assert!(
+                hwp_com_fallback_eligible(&unsupported(), h).is_none(),
+                "{h:?}"
+            );
         }
         for e in [
             ParseError::PasswordProtected("DRM hwp".into()),
@@ -914,7 +939,10 @@ mod tests {
             ParseError::UnsupportedFileType("hwp (kordoc 필요)".into()),
             ParseError::ParseError("hwp 파싱 경로 비정상 진입".into()),
         ] {
-            assert!(hwp_com_fallback_eligible(&e, HwpHeader::Other).is_none(), "{e}");
+            assert!(
+                hwp_com_fallback_eligible(&e, HwpHeader::Other).is_none(),
+                "{e}"
+            );
         }
     }
 

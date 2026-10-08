@@ -369,7 +369,10 @@ mod tests {
         // COM reused the user's Hancom -> not ours
         assert_eq!(single_owned(&new_processes(&[user], &[user])), None);
         let mine = (9000, 222);
-        assert_eq!(single_owned(&new_processes(&[user], &[user, mine])), Some(mine));
+        assert_eq!(
+            single_owned(&new_processes(&[user], &[user, mine])),
+            Some(mine)
+        );
         // ambiguous (two new processes) -> not ours
         assert_eq!(single_owned(&new_processes(&[], &[(1, 1), (2, 2)])), None);
         // same pid, different creation time = a different process (pid reuse) -> new
