@@ -141,13 +141,12 @@ fn hwp5_is_encrypted(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    // bit 1 (암호) | bit 4 (DRM 보안)
-    // 주의: bit 8 (0x100) 는 일부 정상 문서(예: 한컴오피스에서 저장한 공공기관 문서)에도
-    // 자주 set 되어 있어 false positive 유발 — kordoc 가 실제 파싱 가능한 파일을 차단함.
-    // HWP5 spec 상 의미가 모호하므로 검사에서 제외하고, 진짜 암호 비트만 본다.
+    // 비밀번호 사전 차단은 bit 1만 대상으로 한다.
+    // bit 4는 DRM 보안 플래그이며 비밀번호 문서가 아니다. DRM HWP는 여기서 차단하지 않고
+    // Kordoc의 DRM 판정 후 Windows Hancom COM fallback으로 넘겨 정상 사용자 동의창을 보존한다.
+    // bit 8 (0x100) 역시 일부 정상 문서에서 set되므로 계속 제외한다.
     const FLAG_PASSWORD: u32 = 0x0000_0002;
-    const FLAG_DRM: u32 = 0x0000_0010;
-    Ok(properties & (FLAG_PASSWORD | FLAG_DRM) != 0)
+    Ok(properties & FLAG_PASSWORD != 0)
 }
 
 /// HWPX (ZIP) 파일의 META-INF/manifest.xml 에서 encryption-data 요소 존재 확인.

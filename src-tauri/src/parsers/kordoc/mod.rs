@@ -314,6 +314,11 @@ pub fn parse_with_options(path: &Path, opts: KordocOptions) -> Result<ParsedDocu
         if resp.code.as_deref() == Some("ENCRYPTED") {
             return Err(ParseError::PasswordProtected(msg));
         }
+        // Preserve structured Kordoc error codes that callers need for safe, narrow
+        // fallbacks. In particular DRM_PROTECTED must not be lost in the human message.
+        if let Some(code) = resp.code.as_deref() {
+            return Err(ParseError::ParseError(format!("{code}: {msg}")));
+        }
         return Err(ParseError::ParseError(msg));
     }
 
