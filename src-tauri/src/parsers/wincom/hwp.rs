@@ -16,9 +16,10 @@
 //!    Anything-owned instances are recorded (pid + creation time) and cleaned up on
 //!    Quit, or at application shutdown if one is still alive.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use windows::core::Interface;
 use windows::Win32::System::Com::{
@@ -38,6 +39,78 @@ const ROT_MARKER: &str = "hwpobject";
 /// Hwp.exe processes started BY Anything's COM fallback: (pid, creation time FILETIME).
 static OWNED: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
 
+/// Serialize DRM HWP COM extraction and reuse a successful result for the same unchanged file.
+/// This prevents indexer retry + preview from opening the same DRM document repeatedly and
+/// showing Hancom/Fasoo access-consent more than once per Anything session.
+/// The consent itself is never automated or bypassed.
+static HWP_COM_GATE: Mutex<()> = Mutex::new(());
+const HWP_CACHE_CAP: usize = 8;
+type HwpCacheKey = (String, SystemTime, u64);
+
+#[derive(Clone)]
+struct HwpCacheEntry {
+    key: HwpCacheKey,
+    content: String,
+    page_count: Option<usize>,
+}
+
+static HWP_CACHE: OnceLock<Mutex<VecDeque<HwpCacheEntry>>> = OnceLock::new();
+
+fn hwp_cache() -> &'static Mutex<VecDeque<HwpCacheEntry>> {
+    HWP_CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn hwp_cache_key(path: &Path) -> Option<HwpCacheKey> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((
+        normalize_path(&path_arg(path)),
+        meta.modified().ok()?,
+        meta.len(),
+    ))
+}
+
+fn cached_document(path: &Path, key: &HwpCacheKey) -> Option<ParsedDocument> {
+    let mut cache = hwp_cache().lock().ok()?;
+    let idx = cache.iter().position(|e| &e.key == key)?;
+    let entry = cache.remove(idx)?;
+    let doc = document_from_text(path, entry.content.clone(), entry.page_count);
+    cache.push_front(entry);
+    Some(doc)
+}
+
+fn cache_document(key: HwpCacheKey, doc: &ParsedDocument) {
+    if doc.content.is_empty() {
+        return;
+    }
+    let Ok(mut cache) = hwp_cache().lock() else {
+        return;
+    };
+    cache.retain(|e| e.key.0 != key.0);
+    cache.push_front(HwpCacheEntry {
+        key,
+        content: doc.content.clone(),
+        page_count: doc.metadata.page_count,
+    });
+    while cache.len() > HWP_CACHE_CAP {
+        cache.pop_back();
+    }
+}
+
+fn document_from_text(path: &Path, content: String, page_count: Option<usize>) -> ParsedDocument {
+    let chunks = chunk_text(&content, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP);
+    ParsedDocument {
+        content,
+        metadata: DocumentMetadata {
+            title: path.file_stem().and_then(|s| s.to_str()).map(String::from),
+            author: None,
+            created_at: None,
+            page_count,
+        },
+        chunks,
+        garbled_hint: false,
+    }
+}
+
 pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
     if let Ok(metadata) = std::fs::metadata(path) {
         if metadata.len() > MAX_FILE_SIZE {
@@ -49,17 +122,47 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, ParseError> {
         }
     }
 
+    let key = hwp_cache_key(path);
+    if let Some(ref key) = key {
+        if let Some(doc) = cached_document(path, key) {
+            tracing::info!("HWP COM cache hit: {}", path.display());
+            return Ok(doc);
+        }
+    }
+
+    // Hold the gate across the complete COM extraction. A concurrent preview/index request
+    // waits here, then re-checks the cache instead of opening the DRM document again.
+    let _gate = HWP_COM_GATE
+        .lock()
+        .map_err(|_| ParseError::ParseError("HWP COM 동기화 잠금 오류".into()))?;
+    if let Some(ref key) = key {
+        if let Some(doc) = cached_document(path, key) {
+            tracing::info!("HWP COM cache hit after wait: {}", path.display());
+            return Ok(doc);
+        }
+    }
+
     let _com = ComApartment::init();
 
     tracing::info!("HWP COM attach/start attempt: {}", path.display());
-    match attach_open_document(path) {
-        Some(Ok(doc)) => return Ok(doc),
-        Some(Err(e)) => tracing::warn!("HWP COM attach read failed, trying own instance: {e}"),
-        None => tracing::info!(
-            "HWP COM: document not active in a user Hancom instance; starting own instance"
-        ),
+    let result = match attach_open_document(path) {
+        Some(Ok(doc)) => Ok(doc),
+        Some(Err(e)) => {
+            tracing::warn!("HWP COM attach read failed, trying own instance: {e}");
+            parse_with_own_instance(path)
+        }
+        None => {
+            tracing::info!(
+                "HWP COM: document not active in a user Hancom instance; starting own instance"
+            );
+            parse_with_own_instance(path)
+        }
+    };
+
+    if let (Some(key), Ok(doc)) = (key, &result) {
+        cache_document(key, doc);
     }
-    parse_with_own_instance(path)
+    result
 }
 
 // ----------------------------------------------------------------------------
@@ -234,22 +337,11 @@ fn extract(hwp: &Obj, path: &Path) -> Result<ParsedDocument, ParseError> {
         )));
     }
 
-    let chunks = chunk_text(&content, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP);
-    Ok(ParsedDocument {
+    Ok(document_from_text(
+        path,
         content,
-        metadata: DocumentMetadata {
-            title: path.file_stem().and_then(|s| s.to_str()).map(String::from),
-            author: None,
-            created_at: None,
-            page_count: if page_count > 0 {
-                Some(page_count)
-            } else {
-                None
-            },
-        },
-        chunks,
-        garbled_hint: false,
-    })
+        if page_count > 0 { Some(page_count) } else { None },
+    ))
 }
 
 // ----------------------------------------------------------------------------
@@ -384,6 +476,14 @@ mod tests {
         OWNED.lock().unwrap().clear();
         shutdown_owned(); // no-op: never enumerates or terminates user processes
         assert!(OWNED.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cached_text_rebuilds_chunks_without_com() {
+        let doc = document_from_text(Path::new(r"C:\Docs\A.hwp"), "본문 테스트".into(), Some(2));
+        assert_eq!(doc.content, "본문 테스트");
+        assert_eq!(doc.metadata.page_count, Some(2));
+        assert!(!doc.chunks.is_empty());
     }
 
     #[test]
