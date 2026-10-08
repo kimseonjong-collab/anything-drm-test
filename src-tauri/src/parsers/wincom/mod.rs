@@ -39,8 +39,9 @@ use crate::parsers::ParseError;
 /// quit_if_idle(), and releases its COM apartment.
 pub(crate) fn shutdown_workers() {
     docx::shutdown_worker();
-    // HWP fallback is intentionally short-lived (one COM object per DRM file),
-    // so there is no persistent HWP worker to shut down here.
+    // HWP fallback is short-lived (one COM object per DRM file). Only Hwp.exe instances that
+    // Anything itself started and that are still alive are ended; a user's Hancom is untouched.
+    hwp::shutdown_owned();
     pptx::shutdown_worker();
     xlsx::shutdown_worker();
     tracing::info!("Office COM worker shutdown requested");

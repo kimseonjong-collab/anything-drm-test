@@ -357,6 +357,27 @@ async fn parse_kordoc_markdown(
                 }
                 Err(e) => {
                     tracing::warn!("preview: kordoc 실패, fallback 사용 — {} — {:?}", fp, e);
+                    // DRM HWP: same routing as the indexer (kordoc -> Hancom COM -> failure).
+                    if ext == "hwp" {
+                        if let Ok(doc) = crate::parsers::hwp_after_kordoc_failure(path, e) {
+                            let md = doc
+                                .content
+                                .lines()
+                                .map(str::trim_end)
+                                .filter(|l| !l.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n\n");
+                            tracing::info!(
+                                "preview: HWP COM fallback 사용 ({}자) — {}",
+                                md.chars().count(),
+                                fp
+                            );
+                            if let Some(key) = cache_key {
+                                md_cache_put(key, &md);
+                            }
+                            return Ok(md);
+                        }
+                    }
                 }
             }
         } else {

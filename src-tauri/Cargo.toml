@@ -137,7 +137,9 @@ windows-sys = { version = "0.59", features = [
     # Index by using MS Office via Windows COM
     "Win32_System_Variant",
     "Win32_System_Ole",
-    "Win32_System_Com_StructuredStorage"
+    "Win32_System_Com_StructuredStorage",
+    # DRM HWP Hancom COM fallback: prove ownership of Hwp.exe instances Anything starts
+    "Win32_System_Diagnostics_ToolHelp"
 ] }
 # Fixed-version WebView2 Runtime 지원 (이슈 #24): registry 미등록 환경에서도
 # EBWebView 폴더만 있으면 ICoreWebView2Environment 를 직접 만들어 wry 에 inject.

@@ -326,14 +326,10 @@ fn parse_file_inner(
                     ParseError::UnsupportedFileType("hwp (kordoc 필요)".into())
                 }
             });
-            // Kordoc deliberately rejects Hancom/enterprise DRM. On Windows only, fall back
-            // to Hancom's installed Automation object. Hancom's own access-consent prompt is
-            // intentionally preserved; this path never decrypts/copies/bypasses the document.
-            if is_hwp_drm_error(&err) {
-                wincom_fallback_hwp(path, err)
-            } else {
-                Err(err)
-            }
+            // Kordoc rejects Hancom/enterprise DRM (DRM_PROTECTED, or UNSUPPORTED_FORMAT for a
+            // DRM-wrapped container). Shared routing (indexer + preview): kordoc -> Hancom COM ->
+            // failure. Hancom's own access-consent prompt is preserved; never decrypts/copies.
+            hwp_after_kordoc_failure(path, err)
         }
         "hml" => Err(kordoc_err.unwrap_or_else(|| {
             if kordoc::is_available() {
@@ -398,6 +394,7 @@ fn parse_file_inner(
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_hwp_drm_error(err: &ParseError) -> bool {
     let msg = err.to_string().to_lowercase();
     msg.contains("drm_protected")
@@ -406,25 +403,119 @@ fn is_hwp_drm_error(err: &ParseError) -> bool {
         || msg.contains("kordoc: 추출된 텍스트 없음")
 }
 
-#[cfg(windows)]
-fn wincom_fallback_hwp(
-    path: &Path,
-    original_err: ParseError,
-) -> Result<ParsedDocument, ParseError> {
-    match parse_with_timeout(path, 180, "HWP DRM COM", wincom_hwp::parse) {
-        Ok(doc) => Ok(doc),
-        Err(com_err) => Err(ParseError::ParseError(format!(
-            "{original_err}; Hancom COM fallback 실패: {com_err}"
-        ))),
+/// HWP file header kind from magic bytes only (no content interpretation, no decryption).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) enum HwpHeader {
+    /// HWP 5.x (OLE compound file)
+    Cfb,
+    /// HWPX / zip container
+    Zip,
+    /// HWP 3.x
+    Hwp3,
+    /// Not a plain HWP signature: e.g. an enterprise DRM wrapper
+    Other,
+    Unreadable,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn hwp_header_kind(path: &Path) -> HwpHeader {
+    use std::io::Read;
+    let mut buf = [0u8; 32];
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return HwpHeader::Unreadable,
+    };
+    let n = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return HwpHeader::Unreadable,
+    };
+    let b = &buf[..n];
+    if b.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        HwpHeader::Cfb
+    } else if b.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
+        HwpHeader::Zip
+    } else if b.starts_with(b"HWP Document File") {
+        HwpHeader::Hwp3
+    } else {
+        HwpHeader::Other
     }
 }
 
-#[cfg(not(windows))]
-fn wincom_fallback_hwp(
-    _path: &Path,
-    original_err: ParseError,
+/// Is a Kordoc HWP failure a Hancom COM fallback case? Narrow on purpose:
+/// explicit DRM signals, or UNSUPPORTED_FORMAT on a file that is not a plain HWP/HWPX/HWP3
+/// container (DRM wrapper). Password/cloud placeholders and ordinary parse errors are not.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn hwp_com_fallback_eligible(
+    err: &ParseError,
+    header: HwpHeader,
+) -> Option<&'static str> {
+    if matches!(err, ParseError::PasswordProtected(_) | ParseError::CloudPlaceholder(_)) {
+        return None;
+    }
+    if is_hwp_drm_error(err) {
+        return Some("kordoc DRM/empty-text signal");
+    }
+    let msg = err.to_string().to_lowercase();
+    let unsupported = msg.contains("unsupported_format") || msg.contains("지원하지 않는 파일 형식");
+    if unsupported && header == HwpHeader::Other {
+        return Some("UNSUPPORTED_FORMAT on a non-HWP container header (DRM wrapper)");
+    }
+    None
+}
+
+/// HWP after a Kordoc failure - the ONE routing used by both the indexer and the preview:
+/// kordoc -> Hancom COM (only if eligible) -> failure. Logs never contain document text.
+pub fn hwp_after_kordoc_failure(
+    path: &Path,
+    kordoc_err: ParseError,
 ) -> Result<ParsedDocument, ParseError> {
-    Err(original_err)
+    #[cfg(windows)]
+    {
+        route_hwp_failure(path, kordoc_err, hwp_header_kind(path), |p| {
+            parse_with_timeout(p, 180, "HWP DRM COM", wincom_hwp::parse)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(kordoc_err)
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn route_hwp_failure<F>(
+    path: &Path,
+    kordoc_err: ParseError,
+    header: HwpHeader,
+    com: F,
+) -> Result<ParsedDocument, ParseError>
+where
+    F: FnOnce(&Path) -> Result<ParsedDocument, ParseError>,
+{
+    tracing::warn!("HWP kordoc failed: {} — {}", kordoc_err, path.display());
+    let Some(reason) = hwp_com_fallback_eligible(&kordoc_err, header) else {
+        tracing::info!("HWP COM fallback not eligible (header {:?}) — {}", header, path.display());
+        return Err(kordoc_err);
+    };
+    tracing::info!("HWP COM fallback eligible: {} — {}", reason, path.display());
+    match com(path) {
+        Ok(doc) => {
+            tracing::info!(
+                "HWP COM extraction success: {} chars — {}",
+                doc.content.chars().count(),
+                path.display()
+            );
+            Ok(doc)
+        }
+        Err(com_err) => {
+            tracing::warn!("HWP COM extraction failed: {} — {}", com_err, path.display());
+            tracing::warn!("HWP fallback exhausted — {}", path.display());
+            Err(ParseError::ParseError(format!(
+                "{kordoc_err}; Hancom COM fallback 실패: {com_err}"
+            )))
+        }
+    }
 }
 
 // --- wincom fallback wrappers (Windows-only; no-op on other platforms) --------
@@ -735,5 +826,119 @@ mod tests {
             pdf_scan_gate(&fixture("multipage_text.pdf")).is_none(),
             "정상 텍스트 PDF 는 sniff 미검출 → kordoc 경로로 진행"
         );
+    }
+
+    // ---------------------------------------------------------------- DRM HWP routing
+    fn hwp_file(header: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".hwp").tempfile().unwrap();
+        f.write_all(header).unwrap();
+        f.write_all(&[0u8; 64]).unwrap();
+        f
+    }
+
+    const CFB: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    const WRAPPED: &[u8] = b"<!--DRM-CONTAINER-HEADER-->";
+
+    fn text_doc(text: &str) -> ParsedDocument {
+        ParsedDocument {
+            content: text.to_string(),
+            metadata: DocumentMetadata {
+                title: None,
+                author: None,
+                created_at: None,
+                page_count: Some(1),
+            },
+            chunks: chunk_text(text, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP),
+            garbled_hint: false,
+        }
+    }
+
+    fn unsupported() -> ParseError {
+        ParseError::ParseError("UNSUPPORTED_FORMAT: 지원하지 않는 파일 형식입니다.".into())
+    }
+
+    #[test]
+    fn hwp_header_kinds_from_magic_bytes() {
+        assert_eq!(hwp_header_kind(hwp_file(CFB).path()), HwpHeader::Cfb);
+        assert_eq!(hwp_header_kind(hwp_file(b"PK\x03\x04").path()), HwpHeader::Zip);
+        assert_eq!(hwp_header_kind(hwp_file(b"HWP Document File V3.00").path()), HwpHeader::Hwp3);
+        assert_eq!(hwp_header_kind(hwp_file(WRAPPED).path()), HwpHeader::Other);
+        assert_eq!(hwp_header_kind(Path::new("Z:\no\such\file.hwp")), HwpHeader::Unreadable);
+    }
+
+    /// A: a plain HWP5 failing in kordoc is NOT sent to Hancom COM; the error is unchanged.
+    #[test]
+    fn plain_hwp_failure_never_calls_com() {
+        let f = hwp_file(CFB);
+        let mut called = false;
+        let err = route_hwp_failure(f.path(), unsupported(), hwp_header_kind(f.path()), |_| {
+            called = true;
+            Ok(text_doc("x"))
+        })
+        .unwrap_err();
+        assert!(!called);
+        assert_eq!(err.to_string(), unsupported().to_string());
+    }
+
+    /// B/E: DRM-wrapped HWP + UNSUPPORTED_FORMAT -> COM fallback; text + chunks for the index.
+    #[test]
+    fn wrapped_hwp_unsupported_format_uses_com_text_for_index() {
+        let f = hwp_file(WRAPPED);
+        let doc = route_hwp_failure(f.path(), unsupported(), hwp_header_kind(f.path()), |_| {
+            Ok(text_doc("연구개발계획서 본문 고유문구"))
+        })
+        .expect("COM success must be returned");
+        assert_eq!(doc.content, "연구개발계획서 본문 고유문구");
+        assert!(!doc.chunks.is_empty(), "indexer needs chunks for FTS");
+    }
+
+    /// D: the preview's kordoc error has no code prefix - still eligible (same routing).
+    #[test]
+    fn preview_style_message_is_eligible_too() {
+        let e = ParseError::ParseError("지원하지 않는 파일 형식입니다.".into());
+        assert!(hwp_com_fallback_eligible(&e, HwpHeader::Other).is_some());
+    }
+
+    #[test]
+    fn eligibility_is_narrow() {
+        let drm = ParseError::ParseError("DRM_PROTECTED: DRM 보호 문서".into());
+        assert!(hwp_com_fallback_eligible(&drm, HwpHeader::Cfb).is_some()); // existing DRM signal
+        for h in [HwpHeader::Cfb, HwpHeader::Zip, HwpHeader::Hwp3, HwpHeader::Unreadable] {
+            assert!(hwp_com_fallback_eligible(&unsupported(), h).is_none(), "{h:?}");
+        }
+        for e in [
+            ParseError::PasswordProtected("DRM hwp".into()),
+            ParseError::CloudPlaceholder("hwp".into()),
+            ParseError::UnsupportedFileType("hwp (kordoc 필요)".into()),
+            ParseError::ParseError("hwp 파싱 경로 비정상 진입".into()),
+        ] {
+            assert!(hwp_com_fallback_eligible(&e, HwpHeader::Other).is_none(), "{e}");
+        }
+    }
+
+    /// C: COM failure -> no panic, final error keeps both causes.
+    #[test]
+    fn com_failure_ends_in_clean_error() {
+        let f = hwp_file(WRAPPED);
+        let err = route_hwp_failure(f.path(), unsupported(), HwpHeader::Other, |_| {
+            Err(ParseError::ParseError("Hancom HWP Open: 접근 거부".into()))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("UNSUPPORTED_FORMAT")
+                && err.contains("Hancom COM fallback 실패")
+                && err.contains("접근 거부")
+        );
+    }
+
+    /// D/E share one public entry point; a plain HWP passes straight through on every platform.
+    #[test]
+    fn public_entry_point_passes_plain_hwp_error_through() {
+        let f = hwp_file(CFB);
+        let res = hwp_after_kordoc_failure(f.path(), unsupported());
+        let err = res.unwrap_err();
+        assert_eq!(err.to_string(), unsupported().to_string());
     }
 }
